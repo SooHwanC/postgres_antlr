@@ -1,0 +1,117 @@
+{
+    "type": "ROOT",
+    "startLine": 0,
+    "endLine": 0,
+    "children": [
+        {
+            "type": "STATEMENT",
+            "startLine": 1,
+            "endLine": 22,
+            "children": [
+                {
+                    "type": "CREATE_FUNCTION",
+                    "startLine": 1,
+                    "endLine": 22,
+                    "children": [
+                        {
+                            "type": "PLPGSQL_BLOCK",
+                            "startLine": 2,
+                            "endLine": 21,
+                            "children": [
+                                {
+                                    "type": "LABEL",
+                                    "startLine": 2,
+                                    "endLine": 2,
+                                    "children": []
+                                },
+                                {
+                                    "type": "DECLARE_SECTION",
+                                    "startLine": 3,
+                                    "endLine": 4,
+                                    "children": [
+                                        {
+                                            "type": "VARIABLE_DECLARATION",
+                                            "startLine": 4,
+                                            "endLine": 4,
+                                            "children": [
+                                                {
+                                                    "type": "INITIAL_VALUE",
+                                                    "startLine": 4,
+                                                    "endLine": 4,
+                                                    "children": []
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "type": "RAISE_NOTICE",
+                                    "startLine": 6,
+                                    "endLine": 6,
+                                    "children": []
+                                },
+                                {
+                                    "type": "ASSIGNMENT",
+                                    "startLine": 7,
+                                    "endLine": 7,
+                                    "children": []
+                                },
+                                {
+                                    "type": "NESTED_BLOCK",
+                                    "startLine": 11,
+                                    "endLine": 16,
+                                    "children": [
+                                        {
+                                            "type": "DECLARE_SECTION",
+                                            "startLine": 12,
+                                            "endLine": 12,
+                                            "children": [
+                                                {
+                                                    "type": "VARIABLE_DECLARATION",
+                                                    "startLine": 12,
+                                                    "endLine": 12,
+                                                    "children": [
+                                                        {
+                                                            "type": "INITIAL_VALUE",
+                                                            "startLine": 12,
+                                                            "endLine": 12,
+                                                            "children": []
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        {
+                                            "type": "RAISE_NOTICE",
+                                            "startLine": 14,
+                                            "endLine": 14,
+                                            "children": []
+                                        },
+                                        {
+                                            "type": "RAISE_NOTICE",
+                                            "startLine": 15,
+                                            "endLine": 15,
+                                            "children": []
+                                        }
+                                    ]
+                                },
+                                {
+                                    "type": "RAISE_NOTICE",
+                                    "startLine": 18,
+                                    "endLine": 18,
+                                    "children": []
+                                },
+                                {
+                                    "type": "RETURN",
+                                    "startLine": 20,
+                                    "endLine": 20,
+                                    "children": []
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}
