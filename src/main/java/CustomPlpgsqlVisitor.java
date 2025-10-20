@@ -162,7 +162,9 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
         // ELSE 절
         if (ctx.ELSE() != null) {
             PlpgsqlParser.StatementListContext elseStmtList = ctx.statementList(ctx.statementList().size() - 1);
-            int elseStartLine = getActualLineNumber(elseStmtList);
+            
+            // ELSE 키워드의 라인 번호 사용
+            int elseStartLine = baseLineNumber + ctx.ELSE().getSymbol().getLine() - 1;
             int elseEndLine = baseLineNumber + elseStmtList.getStop().getLine() - 1;
             
             Node elseNode = new Node("ELSE", elseStartLine, ifNode);
@@ -240,6 +242,18 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     public Node visitSetStmt(PlpgsqlParser.SetStmtContext ctx) {
         Node setNode = createNode("SET", ctx, currentBlockNode);
         return setNode;
+    }
+    
+    @Override
+    public Node visitExecuteStmt(PlpgsqlParser.ExecuteStmtContext ctx) {
+        Node executeNode = createNode("EXECUTE", ctx, currentBlockNode);
+        return executeNode;
+    }
+    
+    @Override
+    public Node visitPerformStmt(PlpgsqlParser.PerformStmtContext ctx) {
+        Node performNode = createNode("PERFORM", ctx, currentBlockNode);
+        return performNode;
     }
     
     @Override

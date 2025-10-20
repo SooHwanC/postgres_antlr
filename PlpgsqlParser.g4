@@ -200,7 +200,7 @@ forStmt
 
 forQuerySource
     : EXECUTE expression
-    | selectStmt
+    | SELECT selectList fromClause? whereClause? groupByClause? havingClause? orderByClause? limitClause?
     | expression
     ;
 
@@ -376,6 +376,7 @@ literal
     : IntegerLiteral
     | NumericLiteral
     | StringLiteral
+    | DollarQuotedString
     | NULL
     | TRUE
     | FALSE

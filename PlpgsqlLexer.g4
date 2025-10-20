@@ -170,8 +170,14 @@ NumericLiteral: [0-9]+ '.' [0-9]+ | '.' [0-9]+;
 
 StringLiteral: '\'' ( '\'\'' | ~['\r\n\\] | '\\' . )* '\'';
 
-// Identifiers
-Identifier: [a-zA-Z_] [a-zA-Z0-9_$]*;
+// Dollar-quoted strings (e.g., $tag$...$tag$ or $$...$$)
+// Matches $$ ... $$ (most common case for now)
+DollarQuotedString: '$$' .*? '$$'
+    | '$' [a-zA-Z_][a-zA-Z0-9_]* '$' .*? '$' [a-zA-Z_][a-zA-Z0-9_]* '$'
+    ;
+
+// Identifiers  
+Identifier: [a-zA-Z_] [a-zA-Z0-9_]*;
 
 QuotedIdentifier: '"' ( '""' | ~["\r\n] )* '"';
 
