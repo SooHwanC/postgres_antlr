@@ -33,15 +33,21 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     public void enterCreatefunctionstmt(PostgreSQLParser.CreatefunctionstmtContext ctx) {
         enterStatement("CREATE_FUNCTION", ctx.getStart().getLine());
         
+        // $$ 토큰의 실제 라인 번호 찾기
+        int dollarLineNumber = findDollarStringLine(ctx);
+        
+        // SPEC 노드 생성 (함수 선언부: CREATE FUNCTION ... AS $$)
+        int specStartLine = ctx.getStart().getLine();
+        int specEndLine = dollarLineNumber > 0 ? dollarLineNumber - 1 : specStartLine;
+        Node specNode = new Node("SPEC", specStartLine, nodeStack.peek());
+        specNode.endLine = specEndLine;
+        
         // $$ ... $$ 내용 추출 및 PL/pgSQL 파싱
         String plpgsqlCode = extractDollarQuotedString(ctx);
         if (plpgsqlCode != null && !plpgsqlCode.trim().isEmpty()) {
             System.out.println("\n=== Found PL/pgSQL Block ===");
             System.out.println(plpgsqlCode);
             System.out.println("=========================\n");
-            
-            // $$ 토큰의 실제 라인 번호 찾기
-            int dollarLineNumber = findDollarStringLine(ctx);
             
             // PL/pgSQL 파싱 및 노드 트리 구축
             parsePlpgsqlBlock(plpgsqlCode, dollarLineNumber);
@@ -153,17 +159,6 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
             System.err.println("Error parsing PL/pgSQL: " + e.getMessage());
             e.printStackTrace();
         }
-    }
-
-    // STATEMENT (모든 stmt)
-    @Override
-    public void enterStmt(PostgreSQLParser.StmtContext ctx) {
-        enterStatement("STATEMENT", ctx.getStart().getLine());
-    }
-
-    @Override
-    public void exitStmt(PostgreSQLParser.StmtContext ctx) {
-        exitStatement("STATEMENT", ctx.getStop().getLine());
     }
 
     // SELECT

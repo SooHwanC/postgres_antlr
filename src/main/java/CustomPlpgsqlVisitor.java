@@ -37,16 +37,8 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     
     @Override
     public Node visitPlpgsqlBlock(PlpgsqlParser.PlpgsqlBlockContext ctx) {
-        Node blockNode = createNode("PLPGSQL_BLOCK", ctx, parentNode);
-        currentBlockNode = blockNode;
-        
-        System.out.println("Creating PLPGSQL_BLOCK node at line " + blockNode.startLine);
-        
-        // Label 처리
-        if (ctx.label() != null && !ctx.label().isEmpty()) {
-            Node labelNode = new Node("LABEL", blockNode.startLine, blockNode);
-            labelNode.endLine = blockNode.startLine;
-        }
+        // PLPGSQL_BLOCK과 LABEL 노드를 만들지 않고, 직접 내용만 추가
+        currentBlockNode = parentNode;
         
         // DECLARE 섹션
         if (ctx.declareSection() != null) {
@@ -63,7 +55,7 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
             visit(ctx.exceptionSection());
         }
         
-        return blockNode;
+        return null;
     }
     
     @Override
@@ -78,11 +70,8 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     }
     
     private void visitDeclaration(PlpgsqlParser.DeclarationContext ctx, Node parent) {
-        Node varNode = createNode("VARIABLE_DECLARATION", ctx, parent);
-        
-        if (ctx.expression() != null) {
-            Node initNode = createNode("INITIAL_VALUE", ctx.expression(), varNode);
-        }
+        // VARIABLE_DECLARATION과 INITIAL_VALUE 노드를 만들지 않음
+        // 필요하면 변수명 정보만 저장하는 방식으로 변경 가능
     }
     
     @Override
@@ -192,18 +181,16 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     
     @Override
     public Node visitNestedBlock(PlpgsqlParser.NestedBlockContext ctx) {
-        Node nestedNode = createNode("NESTED_BLOCK", ctx, currentBlockNode);
-        Node previousBlock = currentBlockNode;
-        currentBlockNode = nestedNode;
-        
+        // NESTED_BLOCK 노드를 만들지 않고, 내용만 현재 블록에 추가
         // DECLARE 섹션
         if (ctx.declarationList() != null) {
-            // declarationList의 첫 번째와 마지막 declaration으로 범위 계산
             PlpgsqlParser.DeclarationListContext declList = ctx.declarationList();
-            int declStartLine = getActualLineNumber(declList.declaration(0));
+            
+            // DECLARE 키워드가 있는 라인부터 시작 (ctx는 DECLARE부터 시작)
+            int declStartLine = getActualLineNumber(ctx);
             int declEndLine = getActualLineNumber(declList.declaration(declList.declaration().size() - 1));
             
-            Node declareNode = new Node("DECLARE_SECTION", declStartLine, nestedNode);
+            Node declareNode = new Node("DECLARE_SECTION", declStartLine, currentBlockNode);
             declareNode.endLine = declEndLine;
             
             for (PlpgsqlParser.DeclarationContext declCtx : declList.declaration()) {
@@ -214,8 +201,7 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
         // 문장들
         visitStatementList(ctx.statementList());
         
-        currentBlockNode = previousBlock;
-        return nestedNode;
+        return null;
     }
     
     @Override
