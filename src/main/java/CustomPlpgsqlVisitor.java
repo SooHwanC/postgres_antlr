@@ -127,6 +127,23 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
         Node returnNode = createNode("RETURN", ctx, currentBlockNode);
         return returnNode;
     }
+
+    // ========== 커서 관련 문법 ==========
+    
+    @Override
+    public Node visitOpenCursorStmt(PlpgsqlParser.OpenCursorStmtContext ctx) {
+        return createNode("OPEN", ctx, currentBlockNode);
+    }
+
+    @Override
+    public Node visitCloseCursorStmt(PlpgsqlParser.CloseCursorStmtContext ctx) {
+        return createNode("CLOSE", ctx, currentBlockNode);
+    }
+
+    @Override
+    public Node visitFetchStmt(PlpgsqlParser.FetchStmtContext ctx) {
+        return createNode("FETCH", ctx, currentBlockNode);
+    }
     
     @Override
     public Node visitSelectIntoStmt(PlpgsqlParser.SelectIntoStmtContext ctx) {
