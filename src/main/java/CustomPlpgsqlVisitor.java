@@ -4,14 +4,14 @@ import org.antlr.v4.runtime.ParserRuleContext;
 /**
  * PL/pgSQL Parse Tree를 Node 트리로 변환하는 Visitor
  */
-public class PlpgsqlNodeBuilder extends PlpgsqlParserBaseVisitor<Node> {
+public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     
     private Node parentNode;  // PostgreSQL의 CREATE_FUNCTION 노드
     private int baseLineNumber;  // $$ 시작 라인 번호
     private CommonTokenStream tokens;
     private Node currentBlockNode;
     
-    public PlpgsqlNodeBuilder(Node parentNode, int baseLineNumber, CommonTokenStream tokens) {
+    public CustomPlpgsqlVisitor(Node parentNode, int baseLineNumber, CommonTokenStream tokens) {
         this.parentNode = parentNode;
         this.baseLineNumber = baseLineNumber;
         this.tokens = tokens;
@@ -235,3 +235,4 @@ public class PlpgsqlNodeBuilder extends PlpgsqlParserBaseVisitor<Node> {
         return exceptionNode;
     }
 }
+

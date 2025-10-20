@@ -140,12 +140,12 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
             ParseTree tree = parser.plpgsqlBlock();
             
             // PL/pgSQL AST를 Node 트리로 변환
-            PlpgsqlNodeBuilder nodeBuilder = new PlpgsqlNodeBuilder(
+            CustomPlpgsqlVisitor visitor = new CustomPlpgsqlVisitor(
                 nodeStack.peek(),  // 현재 CREATE_FUNCTION 노드를 부모로
                 baseLineNumber,
                 plTokens
             );
-            nodeBuilder.visit(tree);
+            visitor.visit(tree);
             
             System.out.println("PL/pgSQL parsing successful!");
             
