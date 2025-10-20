@@ -427,6 +427,17 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
         exitStatement("CREATE_TRIGGER", ctx.getStop().getLine());
     }
 
+    // CREATE RULE
+    @Override
+    public void enterRulestmt(PostgreSQLParser.RulestmtContext ctx) {
+        enterStatement("CREATE_RULE", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitRulestmt(PostgreSQLParser.RulestmtContext ctx) {
+        exitStatement("CREATE_RULE", ctx.getStop().getLine());
+    }
+
     // CREATE DATABASE
     @Override
     public void enterCreatedbstmt(PostgreSQLParser.CreatedbstmtContext ctx) {
@@ -637,6 +648,39 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     @Override
     public void exitMergestmt(PostgreSQLParser.MergestmtContext ctx) {
         exitStatement("MERGE", ctx.getStop().getLine());
+    }
+
+    // MERGE - INSERT clause (WHEN NOT MATCHED THEN INSERT)
+    @Override
+    public void enterMerge_insert_clause(PostgreSQLParser.Merge_insert_clauseContext ctx) {
+        enterStatement("MERGE_INSERT", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitMerge_insert_clause(PostgreSQLParser.Merge_insert_clauseContext ctx) {
+        exitStatement("MERGE_INSERT", ctx.getStop().getLine());
+    }
+
+    // MERGE - UPDATE clause (WHEN MATCHED THEN UPDATE)
+    @Override
+    public void enterMerge_update_clause(PostgreSQLParser.Merge_update_clauseContext ctx) {
+        enterStatement("MERGE_UPDATE", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitMerge_update_clause(PostgreSQLParser.Merge_update_clauseContext ctx) {
+        exitStatement("MERGE_UPDATE", ctx.getStop().getLine());
+    }
+
+    // MERGE - DELETE clause (WHEN MATCHED THEN DELETE)
+    @Override
+    public void enterMerge_delete_clause(PostgreSQLParser.Merge_delete_clauseContext ctx) {
+        enterStatement("MERGE_DELETE", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitMerge_delete_clause(PostgreSQLParser.Merge_delete_clauseContext ctx) {
+        exitStatement("MERGE_DELETE", ctx.getStop().getLine());
     }
 
     // ========== DCL (Data Control Language) ==========

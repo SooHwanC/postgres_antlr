@@ -130,6 +130,7 @@ executeStmt
 // INSERT statement
 insertStmt
     : INSERT INTO Identifier (LPAREN columnList RPAREN)? VALUES LPAREN expressionList RPAREN (RETURNING expressionList INTO variableList)? SEMI
+    | INSERT INTO Identifier (LPAREN columnList RPAREN)? SELECT selectList fromClause? whereClause? groupByClause? havingClause? orderByClause? limitClause? (RETURNING expressionList INTO variableList)? SEMI
     ;
 
 columnList
@@ -351,6 +352,7 @@ expression
     | expression (AND | OR) expression
     | NOT expression
     | expression IS (NOT)? NULL
+    | expression (NOT)? IN LPAREN expressionList RPAREN
     | CASE expression? whenExprClauseList (ELSE expression)? END
     | arrayExpression
     ;
