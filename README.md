@@ -9,3 +9,8 @@ java -jar ../antlr-4.13.1-complete.jar ../*.g4 -Dlanguage=Java
 
 참고:  https://www.cubrid.com/blog/3830336
 
+추가
+java -jar antlr-4.13.1-complete.jar -o src/main/java PlpgsqlLexer.g4
+
+java -jar antlr-4.13.1-complete.jar -visitor -o src/main/java PlpgsqlParser.g4
+
