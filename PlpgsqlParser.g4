@@ -61,6 +61,7 @@ statement
     | insertStmt
     | updateStmt
     | deleteStmt
+    | setStmt
     | ifStmt
     | caseStmt
     | loopStmt
@@ -109,6 +110,7 @@ fromClause
 
 tableRef
     : Identifier (AS? Identifier)?
+    | functionCall (WITH Identifier)? (AS? Identifier)?
     ;
 
 whereClause
@@ -127,7 +129,7 @@ executeStmt
 
 // INSERT statement
 insertStmt
-    : INSERT INTO Identifier (LPAREN columnList RPAREN)? VALUES LPAREN expressionList RPAREN SEMI
+    : INSERT INTO Identifier (LPAREN columnList RPAREN)? VALUES LPAREN expressionList RPAREN (RETURNING expressionList INTO variableList)? SEMI
     ;
 
 columnList
@@ -140,7 +142,7 @@ expressionList
 
 // UPDATE statement
 updateStmt
-    : UPDATE Identifier SET assignmentList whereClause? SEMI
+    : UPDATE Identifier SET assignmentList whereClause? (RETURNING expressionList INTO variableList)? SEMI
     ;
 
 assignmentList
@@ -153,7 +155,13 @@ columnAssignment
 
 // DELETE statement
 deleteStmt
-    : DELETE FROM Identifier whereClause? SEMI
+    : DELETE FROM Identifier whereClause? (RETURNING expressionList INTO variableList)? SEMI
+    ;
+
+// SET statement (runtime configuration)
+setStmt
+    : SET Identifier (TO | EQ) expression SEMI
+    | SET Identifier FROM CURRENT SEMI
     ;
 
 // IF statement
@@ -187,7 +195,13 @@ whileStmt
 // FOR statement
 forStmt
     : label? FOR Identifier IN REVERSE? expression DOT DOT expression (BY expression)? LOOP statementList END LOOP label? SEMI
-    | label? FOR Identifier IN selectStmt LOOP statementList END LOOP label? SEMI
+    | label? FOR Identifier IN forQuerySource LOOP statementList END LOOP label? SEMI
+    ;
+
+forQuerySource
+    : EXECUTE expression
+    | selectStmt
+    | expression
     ;
 
 // FOREACH statement
@@ -290,9 +304,29 @@ fetchStmt
     : FETCH variableRef INTO variableList SEMI
     ;
 
-// SELECT statement (simplified)
+// SELECT statement (simplified but extended)
 selectStmt
-    : SELECT selectList fromClause? whereClause?
+    : SELECT (DISTINCT | ALL)? selectList fromClause? whereClause? groupByClause? havingClause? orderByClause? limitClause?
+    ;
+
+groupByClause
+    : GROUP BY expressionList
+    ;
+
+havingClause
+    : HAVING expression
+    ;
+
+orderByClause
+    : ORDER BY orderByItem (COMMA orderByItem)*
+    ;
+
+orderByItem
+    : expression (ASC | DESC)? (NULLS (FIRST | LAST))?
+    ;
+
+limitClause
+    : LIMIT (expression | ALL) (OFFSET expression)?
     ;
 
 // Parameter list

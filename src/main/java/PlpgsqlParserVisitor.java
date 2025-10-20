@@ -160,6 +160,12 @@ public interface PlpgsqlParserVisitor<T> extends ParseTreeVisitor<T> {
 	 */
 	T visitDeleteStmt(PlpgsqlParser.DeleteStmtContext ctx);
 	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#setStmt}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitSetStmt(PlpgsqlParser.SetStmtContext ctx);
+	/**
 	 * Visit a parse tree produced by {@link PlpgsqlParser#ifStmt}.
 	 * @param ctx the parse tree
 	 * @return the visitor result
@@ -201,6 +207,12 @@ public interface PlpgsqlParserVisitor<T> extends ParseTreeVisitor<T> {
 	 * @return the visitor result
 	 */
 	T visitForStmt(PlpgsqlParser.ForStmtContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#forQuerySource}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitForQuerySource(PlpgsqlParser.ForQuerySourceContext ctx);
 	/**
 	 * Visit a parse tree produced by {@link PlpgsqlParser#foreachStmt}.
 	 * @param ctx the parse tree
@@ -339,6 +351,36 @@ public interface PlpgsqlParserVisitor<T> extends ParseTreeVisitor<T> {
 	 * @return the visitor result
 	 */
 	T visitSelectStmt(PlpgsqlParser.SelectStmtContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#groupByClause}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitGroupByClause(PlpgsqlParser.GroupByClauseContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#havingClause}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitHavingClause(PlpgsqlParser.HavingClauseContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#orderByClause}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitOrderByClause(PlpgsqlParser.OrderByClauseContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#orderByItem}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitOrderByItem(PlpgsqlParser.OrderByItemContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#limitClause}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitLimitClause(PlpgsqlParser.LimitClauseContext ctx);
 	/**
 	 * Visit a parse tree produced by {@link PlpgsqlParser#parameterList}.
 	 * @param ctx the parse tree

@@ -7,6 +7,7 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     private Stack<Node> nodeStack = new Stack<>();
     private Node root = new Node("ROOT", 0, null);
     private boolean insideInsert = false;  // INSERT 내부 추적
+    private boolean insideExplain = false; // EXPLAIN 내부 추적
 
     public Node getRoot() {
         return root;
@@ -30,7 +31,7 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     }
 
     // ========== DDL (Data Definition Language) ==========
-    
+
     // CREATE FUNCTION
     @Override
     public void enterCreatefunctionstmt(PostgreSQLParser.CreatefunctionstmtContext ctx) {
@@ -47,14 +48,14 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
         
         // $$ ... $$ 내용 추출 및 PL/pgSQL 파싱 ($$가 있는 경우만)
         if (dollarLineNumber > 0) {
-            String plpgsqlCode = extractDollarQuotedString(ctx);
-            if (plpgsqlCode != null && !plpgsqlCode.trim().isEmpty()) {
-                System.out.println("\n=== Found PL/pgSQL Block ===");
-                System.out.println(plpgsqlCode);
-                System.out.println("=========================\n");
-                
-                // PL/pgSQL 파싱 및 노드 트리 구축
-                parsePlpgsqlBlock(plpgsqlCode, dollarLineNumber);
+        String plpgsqlCode = extractDollarQuotedString(ctx);
+        if (plpgsqlCode != null && !plpgsqlCode.trim().isEmpty()) {
+            System.out.println("\n=== Found PL/pgSQL Block ===");
+            System.out.println(plpgsqlCode);
+            System.out.println("=========================\n");
+            
+            // PL/pgSQL 파싱 및 노드 트리 구축
+            parsePlpgsqlBlock(plpgsqlCode, dollarLineNumber);
             }
         }
     }
@@ -575,7 +576,8 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     @Override
     public void enterSelectstmt(PostgreSQLParser.SelectstmtContext ctx) {
         // INSERT 내부의 VALUES를 위한 SELECT는 무시
-        if (insideInsert) {
+        // EXPLAIN 내부의 SELECT는 무시 (EXPLAIN의 대상일 뿐)
+        if (insideInsert || insideExplain) {
             return;
         }
         enterStatement("SELECT", ctx.getStart().getLine());
@@ -584,7 +586,8 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     @Override
     public void exitSelectstmt(PostgreSQLParser.SelectstmtContext ctx) {
         // INSERT 내부의 VALUES를 위한 SELECT는 무시
-        if (insideInsert) {
+        // EXPLAIN 내부의 SELECT는 무시
+        if (insideInsert || insideExplain) {
             return;
         }
         exitStatement("SELECT", ctx.getStop().getLine());
@@ -735,12 +738,14 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     // EXPLAIN
     @Override
     public void enterExplainstmt(PostgreSQLParser.ExplainstmtContext ctx) {
+        insideExplain = true;  // EXPLAIN 시작
         enterStatement("EXPLAIN", ctx.getStart().getLine());
     }
 
     @Override
     public void exitExplainstmt(PostgreSQLParser.ExplainstmtContext ctx) {
         exitStatement("EXPLAIN", ctx.getStop().getLine());
+        insideExplain = false;  // EXPLAIN 종료
     }
 
     // PREPARE

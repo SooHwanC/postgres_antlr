@@ -90,6 +90,24 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
         Node assignNode = createNode("ASSIGNMENT", ctx, currentBlockNode);
         return assignNode;
     }
+
+    @Override
+    public Node visitInsertStmt(PlpgsqlParser.InsertStmtContext ctx) {
+        Node insertNode = createNode("INSERT", ctx, currentBlockNode);
+        return insertNode;
+    }
+
+    @Override
+    public Node visitUpdateStmt(PlpgsqlParser.UpdateStmtContext ctx) {
+        Node updateNode = createNode("UPDATE", ctx, currentBlockNode);
+        return updateNode;
+    }
+
+    @Override
+    public Node visitDeleteStmt(PlpgsqlParser.DeleteStmtContext ctx) {
+        Node deleteNode = createNode("DELETE", ctx, currentBlockNode);
+        return deleteNode;
+    }
     
     @Override
     public Node visitRaiseStmt(PlpgsqlParser.RaiseStmtContext ctx) {
@@ -128,15 +146,30 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
         }
         
         // ELSIF 절들
-        for (int i = 1; i < ctx.statementList().size() - (ctx.ELSE() != null ? 1 : 0); i++) {
-            Node elsifNode = new Node("ELSIF", getActualLineNumber(ctx), ifNode);
-            visitStatementList(ctx.statementList(i));
+        int elsifCount = ctx.expression().size() - 1; // IF 하나 + ELSIF들
+        for (int i = 0; i < elsifCount; i++) {
+            PlpgsqlParser.StatementListContext elsifStmtList = ctx.statementList(i + 1);
+            int elsifStartLine = getActualLineNumber(elsifStmtList);
+            int elsifEndLine = baseLineNumber + elsifStmtList.getStop().getLine() - 1;
+            
+            Node elsifNode = new Node("ELSIF", elsifStartLine, ifNode);
+            elsifNode.endLine = elsifEndLine;
+            
+            currentBlockNode = elsifNode;
+            visitStatementList(elsifStmtList);
         }
         
         // ELSE 절
         if (ctx.ELSE() != null) {
-            Node elseNode = new Node("ELSE", getActualLineNumber(ctx), ifNode);
-            visitStatementList(ctx.statementList(ctx.statementList().size() - 1));
+            PlpgsqlParser.StatementListContext elseStmtList = ctx.statementList(ctx.statementList().size() - 1);
+            int elseStartLine = getActualLineNumber(elseStmtList);
+            int elseEndLine = baseLineNumber + elseStmtList.getStop().getLine() - 1;
+            
+            Node elseNode = new Node("ELSE", elseStartLine, ifNode);
+            elseNode.endLine = elseEndLine;
+            
+            currentBlockNode = elseNode;
+            visitStatementList(elseStmtList);
         }
         
         currentBlockNode = previousBlock;
@@ -177,6 +210,36 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
         
         currentBlockNode = previousBlock;
         return forNode;
+    }
+
+    @Override
+    public Node visitForeachStmt(PlpgsqlParser.ForeachStmtContext ctx) {
+        Node foreachNode = createNode("FOREACH", ctx, currentBlockNode);
+        Node previousBlock = currentBlockNode;
+        currentBlockNode = foreachNode;
+        
+        visitStatementList(ctx.statementList());
+        
+        currentBlockNode = previousBlock;
+        return foreachNode;
+    }
+
+    @Override
+    public Node visitExitStmt(PlpgsqlParser.ExitStmtContext ctx) {
+        Node exitNode = createNode("EXIT", ctx, currentBlockNode);
+        return exitNode;
+    }
+
+    @Override
+    public Node visitContinueStmt(PlpgsqlParser.ContinueStmtContext ctx) {
+        Node continueNode = createNode("CONTINUE", ctx, currentBlockNode);
+        return continueNode;
+    }
+
+    @Override
+    public Node visitSetStmt(PlpgsqlParser.SetStmtContext ctx) {
+        Node setNode = createNode("SET", ctx, currentBlockNode);
+        return setNode;
     }
     
     @Override
