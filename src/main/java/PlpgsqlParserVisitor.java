@@ -268,6 +268,18 @@ public interface PlpgsqlParserVisitor<T> extends ParseTreeVisitor<T> {
 	 */
 	T visitNullStmt(PlpgsqlParser.NullStmtContext ctx);
 	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#commitStmt}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitCommitStmt(PlpgsqlParser.CommitStmtContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#rollbackStmt}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitRollbackStmt(PlpgsqlParser.RollbackStmtContext ctx);
+	/**
 	 * Visit a parse tree produced by {@link PlpgsqlParser#nestedBlock}.
 	 * @param ctx the parse tree
 	 * @return the visitor result

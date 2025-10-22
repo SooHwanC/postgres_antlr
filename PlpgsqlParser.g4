@@ -79,6 +79,8 @@ statement
     | openCursorStmt
     | closeCursorStmt
     | fetchStmt
+    | commitStmt
+    | rollbackStmt
     ;
 
 // Assignment statement
@@ -248,6 +250,16 @@ nullStmt
     : NULL SEMI
     ;
 
+// COMMIT statement
+commitStmt
+    : COMMIT (WORK | TRANSACTION)? SEMI
+    ;
+
+// ROLLBACK statement
+rollbackStmt
+    : ROLLBACK (WORK | TRANSACTION)? (TO SAVEPOINT? Identifier)? SEMI
+    ;
+
 // Nested block
 nestedBlock
     : label? DECLARE? declarationList? BEGIN statementList exceptionSection? END label? SEMI
@@ -344,11 +356,13 @@ expression
     : literal
     | variableRef
     | functionCall
+    | INTERVAL StringLiteral
     | LPAREN expression RPAREN
     | expression (STAR | SLASH | PERCENT) expression
     | expression (PLUS | MINUS) expression
     | expression CONCAT expression
     | expression (EQ | NEQ | LT | LTE | GT | GTE) expression
+    | expression (NOT)? BETWEEN expression AND expression
     | expression (AND | OR) expression
     | NOT expression
     | expression IS (NOT)? NULL

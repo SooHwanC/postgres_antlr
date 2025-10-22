@@ -274,6 +274,18 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     }
     
     @Override
+    public Node visitCommitStmt(PlpgsqlParser.CommitStmtContext ctx) {
+        Node commitNode = createNode("COMMIT", ctx, currentBlockNode);
+        return commitNode;
+    }
+    
+    @Override
+    public Node visitRollbackStmt(PlpgsqlParser.RollbackStmtContext ctx) {
+        Node rollbackNode = createNode("ROLLBACK", ctx, currentBlockNode);
+        return rollbackNode;
+    }
+    
+    @Override
     public Node visitNestedBlock(PlpgsqlParser.NestedBlockContext ctx) {
         // NESTED_BLOCK 노드를 만들지 않고, 내용만 현재 블록에 추가
         // DECLARE 섹션

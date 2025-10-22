@@ -257,6 +257,16 @@ public interface PlpgsqlParserListener extends ParseTreeListener {
 	 */
 	void exitDeleteStmt(PlpgsqlParser.DeleteStmtContext ctx);
 	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#setStmt}.
+	 * @param ctx the parse tree
+	 */
+	void enterSetStmt(PlpgsqlParser.SetStmtContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#setStmt}.
+	 * @param ctx the parse tree
+	 */
+	void exitSetStmt(PlpgsqlParser.SetStmtContext ctx);
+	/**
 	 * Enter a parse tree produced by {@link PlpgsqlParser#ifStmt}.
 	 * @param ctx the parse tree
 	 */
@@ -326,6 +336,16 @@ public interface PlpgsqlParserListener extends ParseTreeListener {
 	 * @param ctx the parse tree
 	 */
 	void exitForStmt(PlpgsqlParser.ForStmtContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#forQuerySource}.
+	 * @param ctx the parse tree
+	 */
+	void enterForQuerySource(PlpgsqlParser.ForQuerySourceContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#forQuerySource}.
+	 * @param ctx the parse tree
+	 */
+	void exitForQuerySource(PlpgsqlParser.ForQuerySourceContext ctx);
 	/**
 	 * Enter a parse tree produced by {@link PlpgsqlParser#foreachStmt}.
 	 * @param ctx the parse tree
@@ -416,6 +436,26 @@ public interface PlpgsqlParserListener extends ParseTreeListener {
 	 * @param ctx the parse tree
 	 */
 	void exitNullStmt(PlpgsqlParser.NullStmtContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#commitStmt}.
+	 * @param ctx the parse tree
+	 */
+	void enterCommitStmt(PlpgsqlParser.CommitStmtContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#commitStmt}.
+	 * @param ctx the parse tree
+	 */
+	void exitCommitStmt(PlpgsqlParser.CommitStmtContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#rollbackStmt}.
+	 * @param ctx the parse tree
+	 */
+	void enterRollbackStmt(PlpgsqlParser.RollbackStmtContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#rollbackStmt}.
+	 * @param ctx the parse tree
+	 */
+	void exitRollbackStmt(PlpgsqlParser.RollbackStmtContext ctx);
 	/**
 	 * Enter a parse tree produced by {@link PlpgsqlParser#nestedBlock}.
 	 * @param ctx the parse tree
@@ -556,6 +596,56 @@ public interface PlpgsqlParserListener extends ParseTreeListener {
 	 * @param ctx the parse tree
 	 */
 	void exitSelectStmt(PlpgsqlParser.SelectStmtContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#groupByClause}.
+	 * @param ctx the parse tree
+	 */
+	void enterGroupByClause(PlpgsqlParser.GroupByClauseContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#groupByClause}.
+	 * @param ctx the parse tree
+	 */
+	void exitGroupByClause(PlpgsqlParser.GroupByClauseContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#havingClause}.
+	 * @param ctx the parse tree
+	 */
+	void enterHavingClause(PlpgsqlParser.HavingClauseContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#havingClause}.
+	 * @param ctx the parse tree
+	 */
+	void exitHavingClause(PlpgsqlParser.HavingClauseContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#orderByClause}.
+	 * @param ctx the parse tree
+	 */
+	void enterOrderByClause(PlpgsqlParser.OrderByClauseContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#orderByClause}.
+	 * @param ctx the parse tree
+	 */
+	void exitOrderByClause(PlpgsqlParser.OrderByClauseContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#orderByItem}.
+	 * @param ctx the parse tree
+	 */
+	void enterOrderByItem(PlpgsqlParser.OrderByItemContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#orderByItem}.
+	 * @param ctx the parse tree
+	 */
+	void exitOrderByItem(PlpgsqlParser.OrderByItemContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#limitClause}.
+	 * @param ctx the parse tree
+	 */
+	void enterLimitClause(PlpgsqlParser.LimitClauseContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#limitClause}.
+	 * @param ctx the parse tree
+	 */
+	void exitLimitClause(PlpgsqlParser.LimitClauseContext ctx);
 	/**
 	 * Enter a parse tree produced by {@link PlpgsqlParser#parameterList}.
 	 * @param ctx the parse tree
