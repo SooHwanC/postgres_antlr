@@ -100,6 +100,18 @@ public interface PlpgsqlParserVisitor<T> extends ParseTreeVisitor<T> {
 	 */
 	T visitTableRef(PlpgsqlParser.TableRefContext ctx);
 	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#joinClause}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitJoinClause(PlpgsqlParser.JoinClauseContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#joinType}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitJoinType(PlpgsqlParser.JoinTypeContext ctx);
+	/**
 	 * Visit a parse tree produced by {@link PlpgsqlParser#whereClause}.
 	 * @param ctx the parse tree
 	 * @return the visitor result
@@ -363,6 +375,30 @@ public interface PlpgsqlParserVisitor<T> extends ParseTreeVisitor<T> {
 	 * @return the visitor result
 	 */
 	T visitSelectStmt(PlpgsqlParser.SelectStmtContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#withClause}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitWithClause(PlpgsqlParser.WithClauseContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#cteList}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitCteList(PlpgsqlParser.CteListContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#cte}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitCte(PlpgsqlParser.CteContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#selectQuery}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitSelectQuery(PlpgsqlParser.SelectQueryContext ctx);
 	/**
 	 * Visit a parse tree produced by {@link PlpgsqlParser#groupByClause}.
 	 * @param ctx the parse tree

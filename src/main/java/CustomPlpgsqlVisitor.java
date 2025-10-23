@@ -124,7 +124,13 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     
     @Override
     public Node visitReturnStmt(PlpgsqlParser.ReturnStmtContext ctx) {
-        Node returnNode = createNode("RETURN", ctx, currentBlockNode);
+        String returnType = "RETURN";
+        if (ctx.NEXT() != null) {
+            returnType = "RETURN_NEXT";
+        } else if (ctx.QUERY() != null) {
+            returnType = "RETURN_QUERY";
+        }
+        Node returnNode = createNode(returnType, ctx, currentBlockNode);
         return returnNode;
     }
 

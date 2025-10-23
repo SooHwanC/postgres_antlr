@@ -157,6 +157,26 @@ public interface PlpgsqlParserListener extends ParseTreeListener {
 	 */
 	void exitTableRef(PlpgsqlParser.TableRefContext ctx);
 	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#joinClause}.
+	 * @param ctx the parse tree
+	 */
+	void enterJoinClause(PlpgsqlParser.JoinClauseContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#joinClause}.
+	 * @param ctx the parse tree
+	 */
+	void exitJoinClause(PlpgsqlParser.JoinClauseContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#joinType}.
+	 * @param ctx the parse tree
+	 */
+	void enterJoinType(PlpgsqlParser.JoinTypeContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#joinType}.
+	 * @param ctx the parse tree
+	 */
+	void exitJoinType(PlpgsqlParser.JoinTypeContext ctx);
+	/**
 	 * Enter a parse tree produced by {@link PlpgsqlParser#whereClause}.
 	 * @param ctx the parse tree
 	 */
@@ -596,6 +616,46 @@ public interface PlpgsqlParserListener extends ParseTreeListener {
 	 * @param ctx the parse tree
 	 */
 	void exitSelectStmt(PlpgsqlParser.SelectStmtContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#withClause}.
+	 * @param ctx the parse tree
+	 */
+	void enterWithClause(PlpgsqlParser.WithClauseContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#withClause}.
+	 * @param ctx the parse tree
+	 */
+	void exitWithClause(PlpgsqlParser.WithClauseContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#cteList}.
+	 * @param ctx the parse tree
+	 */
+	void enterCteList(PlpgsqlParser.CteListContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#cteList}.
+	 * @param ctx the parse tree
+	 */
+	void exitCteList(PlpgsqlParser.CteListContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#cte}.
+	 * @param ctx the parse tree
+	 */
+	void enterCte(PlpgsqlParser.CteContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#cte}.
+	 * @param ctx the parse tree
+	 */
+	void exitCte(PlpgsqlParser.CteContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#selectQuery}.
+	 * @param ctx the parse tree
+	 */
+	void enterSelectQuery(PlpgsqlParser.SelectQueryContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#selectQuery}.
+	 * @param ctx the parse tree
+	 */
+	void exitSelectQuery(PlpgsqlParser.SelectQueryContext ctx);
 	/**
 	 * Enter a parse tree produced by {@link PlpgsqlParser#groupByClause}.
 	 * @param ctx the parse tree

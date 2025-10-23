@@ -42,8 +42,16 @@ dataType
     | TEXT
     | BOOLEAN
     | DATE
-    | TIMESTAMP (LPAREN IntegerLiteral RPAREN)?
+    | TIME (LPAREN IntegerLiteral RPAREN)?
+    | TIMESTAMP (LPAREN IntegerLiteral RPAREN)? (WITH Identifier ZONE)?
+    | TIMESTAMPTZ
+    | INTERVAL
     | RECORD
+    | JSON
+    | JSONB
+    | UUID
+    | BYTEA
+    | MONEY
     | Identifier (PERCENT (TYPE | ROWTYPE))?
     | dataType ARRAY (LBRACK RBRACK)?
     ;
@@ -107,12 +115,26 @@ variableList
     ;
 
 fromClause
-    : FROM tableRef (COMMA tableRef)*
+    : FROM tableRef (joinClause)*
     ;
 
 tableRef
     : Identifier (AS? Identifier)?
     | functionCall (WITH Identifier)? (AS? Identifier)?
+    | LPAREN selectStmt RPAREN (AS? Identifier)?
+    ;
+
+joinClause
+    : COMMA tableRef
+    | joinType? JOIN tableRef (ON expression | USING LPAREN columnList RPAREN)?
+    ;
+
+joinType
+    : INNER
+    | LEFT OUTER?
+    | RIGHT OUTER?
+    | FULL OUTER?
+    | CROSS
     ;
 
 whereClause
@@ -225,6 +247,9 @@ continueStmt
 // RETURN statement
 returnStmt
     : RETURN expression? SEMI
+    | RETURN NEXT expression SEMI
+    | RETURN QUERY selectStmt SEMI
+    | RETURN QUERY EXECUTE expression (USING expressionList)? SEMI
     ;
 
 // RAISE statement
@@ -319,7 +344,23 @@ fetchStmt
 
 // SELECT statement (simplified but extended)
 selectStmt
-    : SELECT (DISTINCT | ALL)? selectList fromClause? whereClause? groupByClause? havingClause? orderByClause? limitClause?
+    : withClause? selectQuery ((UNION | INTERSECT | EXCEPT) ALL? selectQuery)*
+    ;
+
+withClause
+    : WITH cteList
+    ;
+
+cteList
+    : cte (COMMA cte)*
+    ;
+
+cte
+    : Identifier (LPAREN columnList RPAREN)? AS LPAREN selectStmt RPAREN
+    ;
+
+selectQuery
+    : SELECT (DISTINCT (ON LPAREN expressionList RPAREN)? | ALL)? selectList fromClause? whereClause? groupByClause? havingClause? orderByClause? limitClause?
     ;
 
 groupByClause
@@ -357,16 +398,27 @@ expression
     | variableRef
     | functionCall
     | INTERVAL StringLiteral
+    | CAST LPAREN expression AS dataType RPAREN
+    | expression TYPECAST dataType
+    | COALESCE LPAREN expressionList RPAREN
+    | NULLIF LPAREN expression COMMA expression RPAREN
+    | GREATEST LPAREN expressionList RPAREN
+    | LEAST LPAREN expressionList RPAREN
+    | EXISTS LPAREN selectStmt RPAREN
+    | LPAREN selectStmt RPAREN
     | LPAREN expression RPAREN
     | expression (STAR | SLASH | PERCENT) expression
     | expression (PLUS | MINUS) expression
     | expression CONCAT expression
     | expression (EQ | NEQ | LT | LTE | GT | GTE) expression
     | expression (NOT)? BETWEEN expression AND expression
+    | expression (NOT)? (LIKE | ILIKE) expression
+    | expression SIMILAR TO expression
+    | expression (EQ | NEQ | LT | LTE | GT | GTE) (ANY | SOME | ALL) LPAREN (selectStmt | expressionList) RPAREN
     | expression (AND | OR) expression
     | NOT expression
     | expression IS (NOT)? NULL
-    | expression (NOT)? IN LPAREN expressionList RPAREN
+    | expression (NOT)? IN LPAREN (selectStmt | expressionList) RPAREN
     | CASE expression? whenExprClauseList (ELSE expression)? END
     | arrayExpression
     ;
