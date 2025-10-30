@@ -127,6 +127,16 @@ public interface PlpgsqlParserListener extends ParseTreeListener {
 	 */
 	void exitSelectList(PlpgsqlParser.SelectListContext ctx);
 	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#selectItem}.
+	 * @param ctx the parse tree
+	 */
+	void enterSelectItem(PlpgsqlParser.SelectItemContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#selectItem}.
+	 * @param ctx the parse tree
+	 */
+	void exitSelectItem(PlpgsqlParser.SelectItemContext ctx);
+	/**
 	 * Enter a parse tree produced by {@link PlpgsqlParser#variableList}.
 	 * @param ctx the parse tree
 	 */
@@ -767,6 +777,16 @@ public interface PlpgsqlParserListener extends ParseTreeListener {
 	 */
 	void exitArrayExpression(PlpgsqlParser.ArrayExpressionContext ctx);
 	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#specialVariable}.
+	 * @param ctx the parse tree
+	 */
+	void enterSpecialVariable(PlpgsqlParser.SpecialVariableContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#specialVariable}.
+	 * @param ctx the parse tree
+	 */
+	void exitSpecialVariable(PlpgsqlParser.SpecialVariableContext ctx);
+	/**
 	 * Enter a parse tree produced by {@link PlpgsqlParser#functionCall}.
 	 * @param ctx the parse tree
 	 */
@@ -777,6 +797,36 @@ public interface PlpgsqlParserListener extends ParseTreeListener {
 	 */
 	void exitFunctionCall(PlpgsqlParser.FunctionCallContext ctx);
 	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#windowFunction}.
+	 * @param ctx the parse tree
+	 */
+	void enterWindowFunction(PlpgsqlParser.WindowFunctionContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#windowFunction}.
+	 * @param ctx the parse tree
+	 */
+	void exitWindowFunction(PlpgsqlParser.WindowFunctionContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#windowSpec}.
+	 * @param ctx the parse tree
+	 */
+	void enterWindowSpec(PlpgsqlParser.WindowSpecContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#windowSpec}.
+	 * @param ctx the parse tree
+	 */
+	void exitWindowSpec(PlpgsqlParser.WindowSpecContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#sqlGenericStmt}.
+	 * @param ctx the parse tree
+	 */
+	void enterSqlGenericStmt(PlpgsqlParser.SqlGenericStmtContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#sqlGenericStmt}.
+	 * @param ctx the parse tree
+	 */
+	void exitSqlGenericStmt(PlpgsqlParser.SqlGenericStmtContext ctx);
+	/**
 	 * Enter a parse tree produced by {@link PlpgsqlParser#literal}.
 	 * @param ctx the parse tree
 	 */
@@ -786,4 +836,44 @@ public interface PlpgsqlParserListener extends ParseTreeListener {
 	 * @param ctx the parse tree
 	 */
 	void exitLiteral(PlpgsqlParser.LiteralContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#createTempTableStmt}.
+	 * @param ctx the parse tree
+	 */
+	void enterCreateTempTableStmt(PlpgsqlParser.CreateTempTableStmtContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#createTempTableStmt}.
+	 * @param ctx the parse tree
+	 */
+	void exitCreateTempTableStmt(PlpgsqlParser.CreateTempTableStmtContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#createTableColumnDefList}.
+	 * @param ctx the parse tree
+	 */
+	void enterCreateTableColumnDefList(PlpgsqlParser.CreateTableColumnDefListContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#createTableColumnDefList}.
+	 * @param ctx the parse tree
+	 */
+	void exitCreateTableColumnDefList(PlpgsqlParser.CreateTableColumnDefListContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#createTableColumnDef}.
+	 * @param ctx the parse tree
+	 */
+	void enterCreateTableColumnDef(PlpgsqlParser.CreateTableColumnDefContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#createTableColumnDef}.
+	 * @param ctx the parse tree
+	 */
+	void exitCreateTableColumnDef(PlpgsqlParser.CreateTableColumnDefContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#onCommitClause}.
+	 * @param ctx the parse tree
+	 */
+	void enterOnCommitClause(PlpgsqlParser.OnCommitClauseContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#onCommitClause}.
+	 * @param ctx the parse tree
+	 */
+	void exitOnCommitClause(PlpgsqlParser.OnCommitClauseContext ctx);
 }

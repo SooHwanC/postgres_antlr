@@ -11,7 +11,7 @@ import org.antlr.v4.runtime.tree.ParseTreeWalker;
 
 public class Example {
     public static void main(String[] args) throws IOException {
-        InputStream in = new FileInputStream("plpgsql1.sql");
+        InputStream in = new FileInputStream("plpgsql4.sql");
         CharStream s = CharStreams.fromStream(in);
 
         PostgreSQLLexer lexer = new PostgreSQLLexer(s); 
@@ -21,6 +21,7 @@ public class Example {
         ParserRuleContext tree = parser.root(); // PostgreSQL 파서의 시작 규칙
 
         ParseTreeWalker walker = new ParseTreeWalker();
+        
         CustomPostgreSQLListener listener = new CustomPostgreSQLListener(tokens);
         walker.walk(listener, tree);
 

@@ -89,6 +89,8 @@ statement
     | fetchStmt
     | commitStmt
     | rollbackStmt
+    | createTempTableStmt
+    | sqlGenericStmt
     ;
 
 // Assignment statement
@@ -103,11 +105,16 @@ variableRef
 
 // SELECT INTO statement
 selectIntoStmt
-    : SELECT selectList INTO STRICT? variableList fromClause? whereClause? SEMI
+    : withClause? SELECT selectList INTO STRICT? variableList fromClause? whereClause? groupByClause? havingClause? orderByClause? limitClause? SEMI
     ;
 
 selectList
-    : (STAR | expression (COMMA expression)*)
+    : STAR
+    | selectItem (COMMA selectItem)*
+    ;
+
+selectItem
+    : expression (AS? Identifier)?
     ;
 
 variableList
@@ -153,7 +160,7 @@ executeStmt
 
 // INSERT statement
 insertStmt
-    : INSERT INTO Identifier (LPAREN columnList RPAREN)? VALUES LPAREN expressionList RPAREN (RETURNING expressionList INTO variableList)? SEMI
+    : INSERT INTO Identifier (LPAREN columnList RPAREN)? VALUES LPAREN expressionList RPAREN (COMMA LPAREN expressionList RPAREN)* (RETURNING expressionList INTO variableList)? SEMI
     | INSERT INTO Identifier (LPAREN columnList RPAREN)? SELECT selectList fromClause? whereClause? groupByClause? havingClause? orderByClause? limitClause? (RETURNING expressionList INTO variableList)? SEMI
     ;
 
@@ -397,6 +404,8 @@ expression
     : literal
     | variableRef
     | functionCall
+    | windowFunction
+    | specialVariable
     | INTERVAL StringLiteral
     | CAST LPAREN expression AS dataType RPAREN
     | expression TYPECAST dataType
@@ -436,8 +445,29 @@ arrayExpression
     | variableRef LBRACK expression RBRACK
     ;
 
+// Special PL/pgSQL variables (e.g., SQLSTATE in EXCEPTION blocks, FOUND after DML)
+specialVariable
+    : SQLSTATE
+    | FOUND
+    ;
+
 functionCall
-    : Identifier LPAREN (expressionList | STAR)? RPAREN
+    : Identifier LPAREN (DISTINCT expressionList | expressionList | STAR)? RPAREN
+    ;
+
+// Window function (e.g., row_number() OVER (...))
+windowFunction
+    : functionCall OVER LPAREN windowSpec RPAREN
+    ;
+
+windowSpec
+    : (PARTITION BY expressionList)? orderByClause?
+    ;
+
+// Generic SQL consumer to improve tolerance: consumes until ';'
+sqlGenericStmt
+    : (WITH | SELECT | INSERT | UPDATE | DELETE | CREATE | DROP | ALTER | TRUNCATE | ANALYZE | VACUUM | EXPLAIN | LOCK | REINDEX | CLUSTER | COMMENT)
+      (~SEMI)* SEMI
     ;
 
 literal
@@ -448,4 +478,21 @@ literal
     | NULL
     | TRUE
     | FALSE
+    ;
+
+// ===== Additional DDL allowed inside PL/pgSQL blocks =====
+createTempTableStmt
+    : CREATE (TEMP | TEMPORARY)? TABLE (IF NOT EXISTS)? Identifier LPAREN createTableColumnDefList RPAREN onCommitClause? SEMI
+    ;
+
+createTableColumnDefList
+    : createTableColumnDef (COMMA createTableColumnDef)*
+    ;
+
+createTableColumnDef
+    : Identifier dataType
+    ;
+
+onCommitClause
+    : ON COMMIT (DROP | DELETE ROWS | PRESERVE ROWS)
     ;

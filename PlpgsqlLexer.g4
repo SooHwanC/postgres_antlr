@@ -29,6 +29,20 @@ NEXT: 'NEXT';
 QUERY: 'QUERY';
 
 // SQL Commands
+CREATE: 'CREATE';
+DROP: 'DROP';
+ALTER: 'ALTER';
+TRUNCATE: 'TRUNCATE';
+ANALYZE: 'ANALYZE';
+VACUUM: 'VACUUM';
+EXPLAIN: 'EXPLAIN';
+LOCK: 'LOCK';
+REINDEX: 'REINDEX';
+CLUSTER: 'CLUSTER';
+COMMENT: 'COMMENT';
+TABLE: 'TABLE';
+TEMP: 'TEMP';
+TEMPORARY: 'TEMPORARY';
 SELECT: 'SELECT';
 INSERT: 'INSERT';
 UPDATE: 'UPDATE';
@@ -66,6 +80,8 @@ COALESCE: 'COALESCE';
 NULLIF: 'NULLIF';
 GREATEST: 'GREATEST';
 LEAST: 'LEAST';
+OVER: 'OVER';
+PARTITION: 'PARTITION';
 
 // Transaction Control
 COMMIT: 'COMMIT';
@@ -150,7 +166,6 @@ VOLATILE: 'VOLATILE';
 STABLE: 'STABLE';
 IMMUTABLE: 'IMMUTABLE';
 LANGUAGE: 'LANGUAGE';
-RETURNS: 'RETURNS';
 CALLED: 'CALLED';
 SECURITY: 'SECURITY';
 DEFINER: 'DEFINER';
@@ -163,6 +178,8 @@ MOVE: 'MOVE';
 FOUND: 'FOUND';
 CURSOR: 'CURSOR';
 ALIAS: 'ALIAS';
+ROWS: 'ROWS';
+PRESERVE: 'PRESERVE';
 
 // Boolean literals
 TRUE: 'TRUE';
@@ -189,7 +206,6 @@ PLUS: '+';
 MINUS: '-';
 STAR: '*';
 SLASH: '/';
-PERCENT_OP: '%';
 CARET: '^';
 TYPECAST: '::';
 LIKE: 'LIKE';
@@ -215,7 +231,8 @@ LABEL_END: '>>';
 IntegerLiteral: [0-9]+;
 NumericLiteral: [0-9]+ '.' [0-9]+ | '.' [0-9]+;
 
-StringLiteral: '\'' ( '\'\'' | ~['\r\n\\] | '\\' . )* '\'';
+// Allow multi-line single-quoted strings (PostgreSQL permits newlines inside string literals)
+StringLiteral: '\'' ( '\'\'' | ~'\'' )* '\'';
 
 // Dollar-quoted strings (e.g., $tag$...$tag$ or $$...$$)
 // Matches $$ ... $$ (most common case for now)

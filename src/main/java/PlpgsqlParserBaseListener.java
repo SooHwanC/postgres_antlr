@@ -160,6 +160,18 @@ public class PlpgsqlParserBaseListener implements PlpgsqlParserListener {
 	 *
 	 * <p>The default implementation does nothing.</p>
 	 */
+	@Override public void enterSelectItem(PlpgsqlParser.SelectItemContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitSelectItem(PlpgsqlParser.SelectItemContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
 	@Override public void enterVariableList(PlpgsqlParser.VariableListContext ctx) { }
 	/**
 	 * {@inheritDoc}
@@ -928,6 +940,18 @@ public class PlpgsqlParserBaseListener implements PlpgsqlParserListener {
 	 *
 	 * <p>The default implementation does nothing.</p>
 	 */
+	@Override public void enterSpecialVariable(PlpgsqlParser.SpecialVariableContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitSpecialVariable(PlpgsqlParser.SpecialVariableContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
 	@Override public void enterFunctionCall(PlpgsqlParser.FunctionCallContext ctx) { }
 	/**
 	 * {@inheritDoc}
@@ -940,6 +964,42 @@ public class PlpgsqlParserBaseListener implements PlpgsqlParserListener {
 	 *
 	 * <p>The default implementation does nothing.</p>
 	 */
+	@Override public void enterWindowFunction(PlpgsqlParser.WindowFunctionContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitWindowFunction(PlpgsqlParser.WindowFunctionContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void enterWindowSpec(PlpgsqlParser.WindowSpecContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitWindowSpec(PlpgsqlParser.WindowSpecContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void enterSqlGenericStmt(PlpgsqlParser.SqlGenericStmtContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitSqlGenericStmt(PlpgsqlParser.SqlGenericStmtContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
 	@Override public void enterLiteral(PlpgsqlParser.LiteralContext ctx) { }
 	/**
 	 * {@inheritDoc}
@@ -947,6 +1007,54 @@ public class PlpgsqlParserBaseListener implements PlpgsqlParserListener {
 	 * <p>The default implementation does nothing.</p>
 	 */
 	@Override public void exitLiteral(PlpgsqlParser.LiteralContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void enterCreateTempTableStmt(PlpgsqlParser.CreateTempTableStmtContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitCreateTempTableStmt(PlpgsqlParser.CreateTempTableStmtContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void enterCreateTableColumnDefList(PlpgsqlParser.CreateTableColumnDefListContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitCreateTableColumnDefList(PlpgsqlParser.CreateTableColumnDefListContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void enterCreateTableColumnDef(PlpgsqlParser.CreateTableColumnDefContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitCreateTableColumnDef(PlpgsqlParser.CreateTableColumnDefContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void enterOnCommitClause(PlpgsqlParser.OnCommitClauseContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitOnCommitClause(PlpgsqlParser.OnCommitClauseContext ctx) { }
 
 	/**
 	 * {@inheritDoc}

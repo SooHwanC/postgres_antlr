@@ -1,0 +1,28 @@
+{
+  "types": [
+    ["text", "VARCHAR2(4000)"],
+    ["bytea", "BLOB"],
+    ["jsonb", "CLOB"],
+    ["json", "CLOB"],
+    ["timestamptz", "TIMESTAMP WITH TIME ZONE"],
+    ["timestamp", "TIMESTAMP"],
+    ["boolean", "NUMBER(1)"]
+  ],
+  "functions": [
+    ["now()", "SYSTIMESTAMP"],
+    ["current_timestamp", "SYSTIMESTAMP"],
+    ["coalesce", "COALESCE"],
+    ["nullif", "NULLIF"],
+    ["greatest", "GREATEST"],
+    ["least", "LEAST"],
+    ["substr(", "SUBSTR("],
+    ["position(", "INSTR("]
+  ],
+  "system": [
+    ["SQLERRM", "SQLERRM"],
+    ["SQLSTATE", "SQLCODE"],
+    ["FOUND", "SQL%FOUND"]
+  ]
+}
+
+

@@ -82,6 +82,12 @@ public interface PlpgsqlParserVisitor<T> extends ParseTreeVisitor<T> {
 	 */
 	T visitSelectList(PlpgsqlParser.SelectListContext ctx);
 	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#selectItem}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitSelectItem(PlpgsqlParser.SelectItemContext ctx);
+	/**
 	 * Visit a parse tree produced by {@link PlpgsqlParser#variableList}.
 	 * @param ctx the parse tree
 	 * @return the visitor result
@@ -466,15 +472,63 @@ public interface PlpgsqlParserVisitor<T> extends ParseTreeVisitor<T> {
 	 */
 	T visitArrayExpression(PlpgsqlParser.ArrayExpressionContext ctx);
 	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#specialVariable}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitSpecialVariable(PlpgsqlParser.SpecialVariableContext ctx);
+	/**
 	 * Visit a parse tree produced by {@link PlpgsqlParser#functionCall}.
 	 * @param ctx the parse tree
 	 * @return the visitor result
 	 */
 	T visitFunctionCall(PlpgsqlParser.FunctionCallContext ctx);
 	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#windowFunction}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitWindowFunction(PlpgsqlParser.WindowFunctionContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#windowSpec}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitWindowSpec(PlpgsqlParser.WindowSpecContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#sqlGenericStmt}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitSqlGenericStmt(PlpgsqlParser.SqlGenericStmtContext ctx);
+	/**
 	 * Visit a parse tree produced by {@link PlpgsqlParser#literal}.
 	 * @param ctx the parse tree
 	 * @return the visitor result
 	 */
 	T visitLiteral(PlpgsqlParser.LiteralContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#createTempTableStmt}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitCreateTempTableStmt(PlpgsqlParser.CreateTempTableStmtContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#createTableColumnDefList}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitCreateTableColumnDefList(PlpgsqlParser.CreateTableColumnDefListContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#createTableColumnDef}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitCreateTableColumnDef(PlpgsqlParser.CreateTableColumnDefContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#onCommitClause}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitOnCommitClause(PlpgsqlParser.OnCommitClauseContext ctx);
 }

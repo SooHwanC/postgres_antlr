@@ -8,6 +8,7 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     private Node root = new Node("ROOT", 0, null);
     private boolean insideInsert = false;  // INSERT 내부 추적
     private boolean insideExplain = false; // EXPLAIN 내부 추적
+    private boolean plpgsqlLogErrors = false; // PL/pgSQL 파싱 에러 로그 출력 여부
 
     public Node getRoot() {
         return root;
@@ -202,8 +203,10 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
                 public void syntaxError(Recognizer<?, ?> recognizer, Object offendingSymbol,
                                       int line, int charPositionInLine, String msg,
                                       RecognitionException e) {
-                    System.err.println("PL/pgSQL Parse Error at line " + (baseLineNumber + line - 1) 
-                                     + ":" + charPositionInLine + " - " + msg);
+                    if (plpgsqlLogErrors) {
+                        System.err.println("PL/pgSQL Parse Error at line " + (baseLineNumber + line - 1)
+                                         + ":" + charPositionInLine + " - " + msg);
+                    }
                 }
             });
             
