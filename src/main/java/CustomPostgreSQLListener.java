@@ -21,13 +21,13 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     private void enterStatement(String statementType, int line) {
         Node currentNode = new Node(statementType, line, nodeStack.peek());
         nodeStack.push(currentNode);
-        System.out.println("Enter " + statementType + " Statement Line: " + line);
+        // System.out.println("Enter " + statementType + " Statement Line: " + line);
     }
 
     private void exitStatement(String statementType, int line) {
         Node node = nodeStack.pop();
         node.endLine = line;
-        System.out.println("Exit " + statementType + " Statement Line: " + line);
+        // System.out.println("Exit " + statementType + " Statement Line: " + line);
     }
 
     // ========== DDL (Data Definition Language) ==========
@@ -217,8 +217,6 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
                 plTokens
             );
             visitor.visit(tree);
-            
-            System.out.println("PL/pgSQL parsing successful!");
             
         } catch (Exception e) {
             System.err.println("Error parsing PL/pgSQL: " + e.getMessage());
