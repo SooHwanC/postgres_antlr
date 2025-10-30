@@ -26,7 +26,6 @@ public class Example {
 
         listener.printStructure();
 
-        System.out.println(listener.getRoot().toJson());
         try (FileWriter file = new FileWriter("structure.json")) {
             file.write(listener.getRoot().toJson());
             file.flush();

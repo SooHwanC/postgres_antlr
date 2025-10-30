@@ -50,9 +50,6 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
         if (dollarLineNumber > 0) {
         String plpgsqlCode = extractDollarQuotedString(ctx);
         if (plpgsqlCode != null && !plpgsqlCode.trim().isEmpty()) {
-            System.out.println("\n=== Found PL/pgSQL Block ===");
-            System.out.println(plpgsqlCode);
-            System.out.println("=========================\n");
             
             // PL/pgSQL 파싱 및 노드 트리 구축
             parsePlpgsqlBlock(plpgsqlCode, dollarLineNumber);
