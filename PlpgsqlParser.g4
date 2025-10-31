@@ -126,7 +126,8 @@ fromClause
     ;
 
 tableRef
-    : Identifier (AS? Identifier)?
+    : Identifier (DOT Identifier)* (AS? Identifier)?
+    | QuotedIdentifier (DOT QuotedIdentifier)* (AS? Identifier)?
     | functionCall (WITH Identifier)? (AS? Identifier)?
     | LPAREN selectStmt RPAREN (AS? Identifier)?
     ;
