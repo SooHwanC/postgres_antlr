@@ -1,5 +1,6 @@
 import org.antlr.v4.runtime.CommonTokenStream;
 import org.antlr.v4.runtime.ParserRuleContext;
+import org.antlr.v4.runtime.Token;
 
 /**
  * PL/pgSQL Parse Tree를 Node 트리로 변환하는 Visitor
@@ -21,7 +22,21 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
      * 실제 라인 번호 계산 (PL/pgSQL 내부 라인 + 베이스 라인)
      */
     private int getActualLineNumber(ParserRuleContext ctx) {
-        return baseLineNumber + ctx.getStart().getLine() - 1;
+        return baseLineNumber + ctx.getStart().getLine();
+    }
+    
+    /**
+     * 실제 라인 번호 계산 (Token용)
+     */
+    private int getActualLineNumber(Token token) {
+        return baseLineNumber + token.getLine();
+    }
+    
+    /**
+     * 실제 끝 라인 번호 계산 (PL/pgSQL 내부 라인 + 베이스 라인)
+     */
+    private int getActualEndLineNumber(ParserRuleContext ctx) {
+        return baseLineNumber + ctx.getStop().getLine();
     }
     
     /**
@@ -30,7 +45,7 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     private Node createNode(String type, ParserRuleContext ctx, Node parent) {
         int startLine = getActualLineNumber(ctx);
         Node node = new Node(type, startLine, parent);
-        node.endLine = baseLineNumber + ctx.getStop().getLine() - 1;
+        node.endLine = getActualEndLineNumber(ctx);
         
         return node;
     }
@@ -173,7 +188,7 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
         for (int i = 0; i < elsifCount; i++) {
             PlpgsqlParser.StatementListContext elsifStmtList = ctx.statementList(i + 1);
             int elsifStartLine = getActualLineNumber(elsifStmtList);
-            int elsifEndLine = baseLineNumber + elsifStmtList.getStop().getLine() - 1;
+            int elsifEndLine = getActualEndLineNumber(elsifStmtList);
             
             Node elsifNode = new Node("ELSIF", elsifStartLine, ifNode);
             elsifNode.endLine = elsifEndLine;
@@ -187,8 +202,8 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
             PlpgsqlParser.StatementListContext elseStmtList = ctx.statementList(ctx.statementList().size() - 1);
             
             // ELSE 키워드의 라인 번호 사용
-            int elseStartLine = baseLineNumber + ctx.ELSE().getSymbol().getLine() - 1;
-            int elseEndLine = baseLineNumber + elseStmtList.getStop().getLine() - 1;
+            int elseStartLine = getActualLineNumber(ctx.ELSE().getSymbol());
+            int elseEndLine = getActualEndLineNumber(elseStmtList);
             
             Node elseNode = new Node("ELSE", elseStartLine, ifNode);
             elseNode.endLine = elseEndLine;
@@ -294,13 +309,15 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     @Override
     public Node visitNestedBlock(PlpgsqlParser.NestedBlockContext ctx) {
         // NESTED_BLOCK 노드를 만들지 않고, 내용만 현재 블록에 추가
+        Node previousBlock = currentBlockNode;
+        
         // DECLARE 섹션
         if (ctx.declarationList() != null) {
             PlpgsqlParser.DeclarationListContext declList = ctx.declarationList();
             
             // DECLARE 키워드가 있는 라인부터 시작 (ctx는 DECLARE부터 시작)
             int declStartLine = getActualLineNumber(ctx);
-            int declEndLine = getActualLineNumber(declList.declaration(declList.declaration().size() - 1));
+            int declEndLine = getActualEndLineNumber(declList.declaration(declList.declaration().size() - 1));
             
             Node declareNode = new Node("DECLARE_SECTION", declStartLine, currentBlockNode);
             declareNode.endLine = declEndLine;
@@ -310,9 +327,15 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
             }
         }
         
-        // 문장들
+        // 문장들 (statementList)
         visitStatementList(ctx.statementList());
         
+        // EXCEPTION 섹션
+        if (ctx.exceptionSection() != null) {
+            visitExceptionSection(ctx.exceptionSection());
+        }
+        
+        currentBlockNode = previousBlock;
         return null;
     }
     
@@ -331,6 +354,73 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
         }
         
         return exceptionNode;
+    }
+    
+    @Override
+    public Node visitCaseStmt(PlpgsqlParser.CaseStmtContext ctx) {
+        Node caseNode = createNode("CASE", ctx, currentBlockNode);
+        Node previousBlock = currentBlockNode;
+        currentBlockNode = caseNode;
+        
+        // WHEN 절들
+        int whenCount = ctx.whenClauseList().whenClause().size();
+        for (int i = 0; i < whenCount; i++) {
+            PlpgsqlParser.StatementListContext whenStmtList = ctx.whenClauseList().whenClause(i).statementList();
+            int whenStartLine = getActualLineNumber(ctx.whenClauseList().whenClause(i));
+            int whenEndLine = getActualEndLineNumber(whenStmtList);
+            
+            Node whenNode = new Node("WHEN", whenStartLine, caseNode);
+            whenNode.endLine = whenEndLine;
+            
+            currentBlockNode = whenNode;
+            visitStatementList(whenStmtList);
+        }
+        
+        // ELSE 절
+        if (ctx.ELSE() != null) {
+            PlpgsqlParser.StatementListContext elseStmtList = ctx.statementList();
+            int elseStartLine = getActualLineNumber(ctx.ELSE().getSymbol());
+            int elseEndLine = getActualEndLineNumber(elseStmtList);
+            
+            Node elseNode = new Node("ELSE", elseStartLine, caseNode);
+            elseNode.endLine = elseEndLine;
+            
+            currentBlockNode = elseNode;
+            visitStatementList(elseStmtList);
+        }
+        
+        currentBlockNode = previousBlock;
+        return caseNode;
+    }
+    
+    @Override
+    public Node visitAssertStmt(PlpgsqlParser.AssertStmtContext ctx) {
+        Node assertNode = createNode("ASSERT", ctx, currentBlockNode);
+        return assertNode;
+    }
+    
+    @Override
+    public Node visitNullStmt(PlpgsqlParser.NullStmtContext ctx) {
+        Node nullNode = createNode("NULL", ctx, currentBlockNode);
+        return nullNode;
+    }
+    
+    @Override
+    public Node visitGetDiagnosticsStmt(PlpgsqlParser.GetDiagnosticsStmtContext ctx) {
+        Node diagNode = createNode("GET_DIAGNOSTICS", ctx, currentBlockNode);
+        return diagNode;
+    }
+    
+    @Override
+    public Node visitCreateTempTableStmt(PlpgsqlParser.CreateTempTableStmtContext ctx) {
+        Node createTableNode = createNode("CREATE_TEMP_TABLE", ctx, currentBlockNode);
+        return createTableNode;
+    }
+    
+    @Override
+    public Node visitSqlGenericStmt(PlpgsqlParser.SqlGenericStmtContext ctx) {
+        Node sqlNode = createNode("SQL_GENERIC", ctx, currentBlockNode);
+        return sqlNode;
     }
 }
 

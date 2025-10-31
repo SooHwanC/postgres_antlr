@@ -467,7 +467,7 @@ windowSpec
 
 // Generic SQL consumer to improve tolerance: consumes until ';'
 sqlGenericStmt
-    : (WITH | SELECT | INSERT | UPDATE | DELETE | CREATE | DROP | ALTER | TRUNCATE | ANALYZE | VACUUM | EXPLAIN | LOCK | REINDEX | CLUSTER | COMMENT)
+    : (WITH | SELECT | INSERT | UPDATE | DELETE | CREATE | DROP | ALTER | TRUNCATE | ANALYZE | VACUUM | EXPLAIN | LOCK | REINDEX | CLUSTER | COMMENT | CALL)
       (~SEMI)* SEMI
     ;
 

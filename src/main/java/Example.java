@@ -11,7 +11,7 @@ import org.antlr.v4.runtime.tree.ParseTreeWalker;
 
 public class Example {
     public static void main(String[] args) throws IOException {
-        InputStream in = new FileInputStream("plpgsql4.sql");
+        InputStream in = new FileInputStream("plpgsql5.sql");
         CharStream s = CharStreams.fromStream(in);
 
         PostgreSQLLexer lexer = new PostgreSQLLexer(s); 
