@@ -75,7 +75,12 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     
     @Override
     public Node visitDeclareSection(PlpgsqlParser.DeclareSectionContext ctx) {
-        Node declareNode = createNode("DECLARE_SECTION", ctx, currentBlockNode);
+        // DECLARE 키워드의 실제 줄 번호 사용
+        int declStartLine = getActualLineNumber(ctx.DECLARE().getSymbol());
+        int declEndLine = getActualEndLineNumber(ctx.declarationList().declaration(ctx.declarationList().declaration().size() - 1));
+        
+        Node declareNode = new Node("DECLARE_SECTION", declStartLine, currentBlockNode);
+        declareNode.endLine = declEndLine;
         
         for (PlpgsqlParser.DeclarationContext declCtx : ctx.declarationList().declaration()) {
             visitDeclaration(declCtx, declareNode);
@@ -315,8 +320,15 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
         if (ctx.declarationList() != null) {
             PlpgsqlParser.DeclarationListContext declList = ctx.declarationList();
             
-            // DECLARE 키워드가 있는 라인부터 시작 (ctx는 DECLARE부터 시작)
-            int declStartLine = getActualLineNumber(ctx);
+            // DECLARE 키워드가 있는 라인부터 시작
+            int declStartLine;
+            if (ctx.DECLARE() != null) {
+                // DECLARE 키워드의 실제 줄 번호 사용
+                declStartLine = getActualLineNumber(ctx.DECLARE().getSymbol());
+            } else {
+                // DECLARE 키워드가 없으면 declarationList의 시작 줄 사용
+                declStartLine = getActualLineNumber(declList);
+            }
             int declEndLine = getActualEndLineNumber(declList.declaration(declList.declaration().size() - 1));
             
             Node declareNode = new Node("DECLARE_SECTION", declStartLine, currentBlockNode);

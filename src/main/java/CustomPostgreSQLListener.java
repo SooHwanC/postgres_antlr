@@ -195,14 +195,10 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
             CommonTokenStream plTokens = new CommonTokenStream(lexer);
             PlpgsqlParser parser = new PlpgsqlParser(plTokens);
             
-            int firstRealTokenLine = calculateActualStartLine(plpgsqlCode, plTokens);
-            
-            int adjustedBaseLineNumber;
-            if (firstRealTokenLine == 1) {
-                adjustedBaseLineNumber = baseLineNumber;
-            } else {
-                adjustedBaseLineNumber = baseLineNumber + (firstRealTokenLine - 1) - firstRealTokenLine;
-            }
+            // baseLineNumber는 이미 PL/pgSQL 코드가 시작하는 원본 파일의 줄 번호 ($procedure$ 다음 줄)
+            // CustomPlpgsqlVisitor에서 DECLARE 키워드의 줄 번호를 직접 사용하므로,
+            // baseLineNumber를 그대로 사용하면 됨
+            int adjustedBaseLineNumber = baseLineNumber;
             
             // 에러 리스너 추가
             parser.removeErrorListeners();
