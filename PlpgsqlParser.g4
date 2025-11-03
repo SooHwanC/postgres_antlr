@@ -161,8 +161,8 @@ executeStmt
 
 // INSERT statement
 insertStmt
-    : INSERT INTO Identifier (LPAREN columnList RPAREN)? VALUES LPAREN expressionList RPAREN (COMMA LPAREN expressionList RPAREN)* (RETURNING expressionList INTO variableList)? SEMI
-    | INSERT INTO Identifier (LPAREN columnList RPAREN)? SELECT selectList fromClause? whereClause? groupByClause? havingClause? orderByClause? limitClause? (RETURNING expressionList INTO variableList)? SEMI
+    : INSERT INTO Identifier (DOT Identifier)* (LPAREN columnList RPAREN)? VALUES LPAREN expressionList RPAREN (COMMA LPAREN expressionList RPAREN)* (RETURNING expressionList (INTO variableList)?)? SEMI
+    | INSERT INTO Identifier (DOT Identifier)* (LPAREN columnList RPAREN)? selectStmt (RETURNING expressionList (INTO variableList)?)? SEMI
     ;
 
 columnList
@@ -175,7 +175,7 @@ expressionList
 
 // UPDATE statement
 updateStmt
-    : UPDATE Identifier SET assignmentList whereClause? (RETURNING expressionList INTO variableList)? SEMI
+    : withClause? UPDATE Identifier (DOT Identifier)* (AS? Identifier)? SET assignmentList (FROM tableRef (joinClause)*)? whereClause? (RETURNING expressionList (INTO variableList)?)? SEMI
     ;
 
 assignmentList
@@ -183,12 +183,12 @@ assignmentList
     ;
 
 columnAssignment
-    : Identifier EQ expression
+    : Identifier (DOT Identifier)* EQ expression
     ;
 
 // DELETE statement
 deleteStmt
-    : DELETE FROM Identifier whereClause? (RETURNING expressionList INTO variableList)? SEMI
+    : withClause? DELETE FROM Identifier (DOT Identifier)* (AS? Identifier)? (USING tableRef (COMMA tableRef)*)? whereClause? (RETURNING expressionList (INTO variableList)?)? SEMI
     ;
 
 // SET statement (runtime configuration)
@@ -467,7 +467,7 @@ windowSpec
 
 // Generic SQL consumer to improve tolerance: consumes until ';'
 sqlGenericStmt
-    : (WITH | SELECT | INSERT | UPDATE | DELETE | CREATE | DROP | ALTER | TRUNCATE | ANALYZE | VACUUM | EXPLAIN | LOCK | REINDEX | CLUSTER | COMMENT | CALL)
+    : (CREATE | DROP | ALTER | TRUNCATE | ANALYZE | VACUUM | EXPLAIN | LOCK | REINDEX | CLUSTER | COMMENT | CALL)
       (~SEMI)* SEMI
     ;
 

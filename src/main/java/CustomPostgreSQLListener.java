@@ -22,13 +22,11 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     private void enterStatement(String statementType, int line) {
         Node currentNode = new Node(statementType, line, nodeStack.peek());
         nodeStack.push(currentNode);
-        // System.out.println("Enter " + statementType + " Statement Line: " + line);
     }
 
     private void exitStatement(String statementType, int line) {
         Node node = nodeStack.pop();
         node.endLine = line;
-        // System.out.println("Exit " + statementType + " Statement Line: " + line);
     }
 
     // ========== DDL (Data Definition Language) ==========
@@ -87,20 +85,11 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     public void enterDostmt(PostgreSQLParser.DostmtContext ctx) {
         enterStatement("DO", ctx.getStart().getLine());
         
-        // DO 문도 $$ ... $$ 블록을 가질 수 있음
         int dollarLineNumber = findDollarStringLineForDo(ctx);
         
-        // DO 문은 SPEC이 없음 (함수 선언이 아니므로)
-        
-        // $$ ... $$ 내용 추출 및 PL/pgSQL 파싱 ($$가 있는 경우만)
         if (dollarLineNumber > 0) {
             String plpgsqlCode = extractDollarQuotedStringForDo(ctx);
             if (plpgsqlCode != null && !plpgsqlCode.trim().isEmpty()) {
-                System.out.println("\n=== Found PL/pgSQL Block in DO ===");
-                System.out.println(plpgsqlCode);
-                System.out.println("=========================\n");
-                
-                // PL/pgSQL 파싱 및 노드 트리 구축
                 parsePlpgsqlBlock(plpgsqlCode, dollarLineNumber);
             }
         }
@@ -132,7 +121,6 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
      * DO 문에서 $$ ... $$ 내용 추출
      */
     private String extractDollarQuotedStringForDo(PostgreSQLParser.DostmtContext ctx) {
-        // dostmt_opt_item에서 sconst 찾기
         if (ctx.dostmt_opt_list() != null) {
             for (PostgreSQLParser.Dostmt_opt_itemContext optItem : ctx.dostmt_opt_list().dostmt_opt_item()) {
                 if (optItem.sconst() != null) {
@@ -147,16 +135,13 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
      * Context에서 $$ ... $$ 사이의 내용 추출
      */
     private String extractDollarQuotedString(PostgreSQLParser.CreatefunctionstmtContext ctx) {
-        // createfunc_opt_list에서 AS func_as 찾기
         PostgreSQLParser.Createfunc_opt_listContext optList = ctx.createfunc_opt_list();
         if (optList == null) return null;
         
         for (PostgreSQLParser.Createfunc_opt_itemContext optItem : optList.createfunc_opt_item()) {
             if (optItem.AS() != null && optItem.func_as() != null) {
-                // func_as -> sconst -> anysconst 탐색
                 PostgreSQLParser.Func_asContext funcAs = optItem.func_as();
                 if (funcAs.def != null) {
-                    // def는 sconst
                     return extractFromSconst(funcAs.def);
                 }
             }
@@ -173,10 +158,8 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
         
         PostgreSQLParser.AnysconstContext anysconst = sconstCtx.anysconst();
         
-        // BeginDollarStringConstant가 있는지 확인
         if (anysconst.BeginDollarStringConstant() == null) return null;
         
-        // DollarText들을 모두 합치기
         StringBuilder content = new StringBuilder();
         for (TerminalNode dollarText : anysconst.DollarText()) {
             content.append(dollarText.getText());
@@ -195,9 +178,6 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
             CommonTokenStream plTokens = new CommonTokenStream(lexer);
             PlpgsqlParser parser = new PlpgsqlParser(plTokens);
             
-            // baseLineNumber는 이미 PL/pgSQL 코드가 시작하는 원본 파일의 줄 번호 ($procedure$ 다음 줄)
-            // CustomPlpgsqlVisitor에서 DECLARE 키워드의 줄 번호를 직접 사용하므로,
-            // baseLineNumber를 그대로 사용하면 됨
             int adjustedBaseLineNumber = baseLineNumber;
             
             // 에러 리스너 추가
@@ -231,32 +211,6 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
         }
     }
     
-    /**
-     * 추출된 PL/pgSQL 코드에서 실제 코드가 시작하는 라인 번호 계산
-     * (앞부분의 빈 줄과 주석만 있는 부분을 제외)
-     */
-    private int calculateActualStartLine(String plpgsqlCode, CommonTokenStream tokens) {
-        // 토큰 스트림에서 첫 번째 실제 코드 토큰 찾기 (주석이나 공백이 아닌)
-        // 주석과 공백은 HIDDEN 채널로 처리되므로, DEFAULT 채널의 첫 번째 토큰을 찾으면 됨
-        tokens.seek(0);
-        int firstRealTokenLine = 1;
-        
-        // 모든 토큰을 확인하여 첫 번째 실제 코드 토큰의 라인 찾기
-        for (int i = 0; i < tokens.size(); i++) {
-            Token token = tokens.get(i);
-            
-            // HIDDEN 채널이 아닌 첫 번째 토큰 (주석과 공백은 HIDDEN 채널)
-            // EOF 토큰이 아니고 실제 코드 토큰인 경우
-            if (token.getChannel() == Token.DEFAULT_CHANNEL && 
-                token.getType() != Token.EOF) {
-                firstRealTokenLine = token.getLine();
-                break;
-            }
-        }
-        
-        return firstRealTokenLine;
-    }
-
     // SET
     @Override
     public void enterVariablesetstmt(PostgreSQLParser.VariablesetstmtContext ctx) {
