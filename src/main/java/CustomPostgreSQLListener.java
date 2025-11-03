@@ -190,11 +190,19 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
      */
     private void parsePlpgsqlBlock(String plpgsqlCode, int baseLineNumber) {
         try {
-            // PL/pgSQL Lexer & Parser 생성
             CharStream input = CharStreams.fromString(plpgsqlCode);
             PlpgsqlLexer lexer = new PlpgsqlLexer(input);
             CommonTokenStream plTokens = new CommonTokenStream(lexer);
             PlpgsqlParser parser = new PlpgsqlParser(plTokens);
+            
+            int firstRealTokenLine = calculateActualStartLine(plpgsqlCode, plTokens);
+            
+            int adjustedBaseLineNumber;
+            if (firstRealTokenLine == 1) {
+                adjustedBaseLineNumber = baseLineNumber;
+            } else {
+                adjustedBaseLineNumber = baseLineNumber + (firstRealTokenLine - 1) - firstRealTokenLine;
+            }
             
             // 에러 리스너 추가
             parser.removeErrorListeners();
@@ -204,7 +212,7 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
                                       int line, int charPositionInLine, String msg,
                                       RecognitionException e) {
                     if (plpgsqlLogErrors) {
-                        System.err.println("PL/pgSQL Parse Error at line " + (baseLineNumber + line - 1)
+                        System.err.println("PL/pgSQL Parse Error at line " + (adjustedBaseLineNumber + line)
                                          + ":" + charPositionInLine + " - " + msg);
                     }
                 }
@@ -213,10 +221,10 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
             // 파싱 시작
             ParseTree tree = parser.plpgsqlBlock();
             
-            // PL/pgSQL AST를 Node 트리로 변환
+
             CustomPlpgsqlVisitor visitor = new CustomPlpgsqlVisitor(
-                nodeStack.peek(),  // 현재 CREATE_FUNCTION 노드를 부모로
-                baseLineNumber,
+                nodeStack.peek(),
+                adjustedBaseLineNumber,
                 plTokens
             );
             visitor.visit(tree);
@@ -225,6 +233,32 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
             System.err.println("Error parsing PL/pgSQL: " + e.getMessage());
             e.printStackTrace();
         }
+    }
+    
+    /**
+     * 추출된 PL/pgSQL 코드에서 실제 코드가 시작하는 라인 번호 계산
+     * (앞부분의 빈 줄과 주석만 있는 부분을 제외)
+     */
+    private int calculateActualStartLine(String plpgsqlCode, CommonTokenStream tokens) {
+        // 토큰 스트림에서 첫 번째 실제 코드 토큰 찾기 (주석이나 공백이 아닌)
+        // 주석과 공백은 HIDDEN 채널로 처리되므로, DEFAULT 채널의 첫 번째 토큰을 찾으면 됨
+        tokens.seek(0);
+        int firstRealTokenLine = 1;
+        
+        // 모든 토큰을 확인하여 첫 번째 실제 코드 토큰의 라인 찾기
+        for (int i = 0; i < tokens.size(); i++) {
+            Token token = tokens.get(i);
+            
+            // HIDDEN 채널이 아닌 첫 번째 토큰 (주석과 공백은 HIDDEN 채널)
+            // EOF 토큰이 아니고 실제 코드 토큰인 경우
+            if (token.getChannel() == Token.DEFAULT_CHANNEL && 
+                token.getType() != Token.EOF) {
+                firstRealTokenLine = token.getLine();
+                break;
+            }
+        }
+        
+        return firstRealTokenLine;
     }
 
     // SET
