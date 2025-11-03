@@ -419,6 +419,12 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     
     @Override
     public Node visitSqlGenericStmt(PlpgsqlParser.SqlGenericStmtContext ctx) {
+        // CALL 문인지 확인하여 별도 타입으로 처리
+        if (ctx.CALL() != null) {
+            Node callNode = createNode("CALL", ctx, currentBlockNode);
+            return callNode;
+        }
+        
         Node sqlNode = createNode("SQL_GENERIC", ctx, currentBlockNode);
         return sqlNode;
     }
