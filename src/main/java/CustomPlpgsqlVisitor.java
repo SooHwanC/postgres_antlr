@@ -437,6 +437,12 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
             return callNode;
         }
         
+        // WITH 절로 시작하는 CTE 구문인지 확인
+        if (ctx.WITH() != null) {
+            Node cteNode = createNode("CTE", ctx, currentBlockNode);
+            return cteNode;
+        }
+        
         Node sqlNode = createNode("SQL_GENERIC", ctx, currentBlockNode);
         return sqlNode;
     }
