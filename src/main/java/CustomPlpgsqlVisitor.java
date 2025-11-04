@@ -189,7 +189,7 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
         }
         
         // ELSIF 절들
-        int elsifCount = ctx.expression().size() - 1; // IF 하나 + ELSIF들
+        int elsifCount = ctx.expression().size() - 1; 
         for (int i = 0; i < elsifCount; i++) {
             PlpgsqlParser.StatementListContext elsifStmtList = ctx.statementList(i + 1);
             int elsifStartLine = getActualLineNumber(elsifStmtList);
@@ -423,8 +423,13 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     }
     
     @Override
+    public Node visitCteStmt(PlpgsqlParser.CteStmtContext ctx) {
+        Node cteNode = createNode("CTE", ctx, currentBlockNode);
+        return cteNode;
+    }
+    
+    @Override
     public Node visitSqlGenericStmt(PlpgsqlParser.SqlGenericStmtContext ctx) {
-        // CALL 문인지 확인하여 별도 타입으로 처리
         if (ctx.CALL() != null) {
             Node callNode = createNode("CALL", ctx, currentBlockNode);
             return callNode;

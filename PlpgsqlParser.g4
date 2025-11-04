@@ -90,6 +90,7 @@ statement
     | commitStmt
     | rollbackStmt
     | createTempTableStmt
+    | cteStmt
     | sqlGenericStmt
     ;
 
@@ -159,10 +160,11 @@ executeStmt
     : EXECUTE expression (INTO variableList)? (USING expressionList)? SEMI
     ;
 
-// INSERT statement
+// INSERT statement  
+// INSERT ... SELECT의 경우 복잡한 SELECT 구문을 완벽히 파싱하지 않고 세미콜론까지 소비
 insertStmt
     : INSERT INTO Identifier (DOT Identifier)* (LPAREN columnList RPAREN)? VALUES LPAREN expressionList RPAREN (COMMA LPAREN expressionList RPAREN)* (RETURNING expressionList (INTO variableList)?)? SEMI
-    | INSERT INTO Identifier (DOT Identifier)* (LPAREN columnList RPAREN)? selectStmt (RETURNING expressionList (INTO variableList)?)? SEMI
+    | INSERT INTO Identifier (DOT Identifier)* (LPAREN columnList RPAREN)? (~SEMI)+ SEMI  // SELECT 포함한 모든 것을 세미콜론까지 소비
     ;
 
 columnList
@@ -420,7 +422,7 @@ expression
     | expression (STAR | SLASH | PERCENT) expression
     | expression (PLUS | MINUS) expression
     | expression CONCAT expression
-    | expression (EQ | NEQ | LT | LTE | GT | GTE) expression
+    | expression (EQ | NEQ | LT | LTE | GT | GTE) expression (LPAREN PLUS RPAREN)?  // Oracle outer join hint: col = col2 (+)
     | expression (NOT)? BETWEEN expression AND expression
     | expression (NOT)? (LIKE | ILIKE) expression
     | expression SIMILAR TO expression
@@ -453,7 +455,16 @@ specialVariable
     ;
 
 functionCall
-    : Identifier LPAREN (DISTINCT expressionList | expressionList | STAR)? RPAREN
+    : (Identifier | LEFT | RIGHT | SUBSTRING | POSITION) LPAREN functionCallArgs RPAREN
+    ;
+
+functionCallArgs
+    : DISTINCT expressionList
+    | expressionList
+    | expression IN expression  // position('str' in col)
+    | expression FROM expression (FOR expression)?  // substring(col from 1 for 10)
+    | STAR
+    |  // 빈 파라미터 허용
     ;
 
 // Window function (e.g., row_number() OVER (...))
@@ -463,6 +474,11 @@ windowFunction
 
 windowSpec
     : (PARTITION BY expressionList)? orderByClause?
+    ;
+
+// CTE (Common Table Expression) statement: WITH ... INSERT/UPDATE/DELETE/SELECT
+cteStmt
+    : WITH cteList (insertStmt | updateStmt | deleteStmt | selectIntoStmt | (~SEMI)+ SEMI)
     ;
 
 // Generic SQL consumer to improve tolerance: consumes until ';'
@@ -491,7 +507,7 @@ createTableColumnDefList
     ;
 
 createTableColumnDef
-    : Identifier dataType
+    : Identifier dataType (NOT? NULL)? (DEFAULT expression)?
     ;
 
 onCommitClause

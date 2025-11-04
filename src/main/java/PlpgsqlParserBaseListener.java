@@ -964,6 +964,18 @@ public class PlpgsqlParserBaseListener implements PlpgsqlParserListener {
 	 *
 	 * <p>The default implementation does nothing.</p>
 	 */
+	@Override public void enterFunctionCallArgs(PlpgsqlParser.FunctionCallArgsContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitFunctionCallArgs(PlpgsqlParser.FunctionCallArgsContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
 	@Override public void enterWindowFunction(PlpgsqlParser.WindowFunctionContext ctx) { }
 	/**
 	 * {@inheritDoc}
@@ -983,6 +995,18 @@ public class PlpgsqlParserBaseListener implements PlpgsqlParserListener {
 	 * <p>The default implementation does nothing.</p>
 	 */
 	@Override public void exitWindowSpec(PlpgsqlParser.WindowSpecContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void enterCteStmt(PlpgsqlParser.CteStmtContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitCteStmt(PlpgsqlParser.CteStmtContext ctx) { }
 	/**
 	 * {@inheritDoc}
 	 *

@@ -6,8 +6,8 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     private TokenStream tokens;
     private Stack<Node> nodeStack = new Stack<>();
     private Node root = new Node("ROOT", 0, null);
-    private boolean insideInsert = false;  // INSERT 내부 추적
-    private boolean insideExplain = false; // EXPLAIN 내부 추적
+    private boolean insideInsert = false;
+    private boolean insideExplain = false;
     private boolean plpgsqlLogErrors = false; // PL/pgSQL 파싱 에러 로그 출력 여부
 
     public Node getRoot() {
@@ -36,29 +36,27 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     public void enterCreatefunctionstmt(PostgreSQLParser.CreatefunctionstmtContext ctx) {
         enterStatement("CREATE_FUNCTION", ctx.getStart().getLine());
         
-        // $$ 토큰의 실제 라인 번호 찾기
         int dollarLineNumber = findDollarStringLine(ctx);
         
-        // SPEC 노드 생성 (함수 선언부: CREATE FUNCTION ... AS $$)
         int specStartLine = ctx.getStart().getLine();
-        int specEndLine = dollarLineNumber > 0 ? dollarLineNumber - 1 : ctx.getStop().getLine();
+        int specEndLine = dollarLineNumber > 0 ? dollarLineNumber : ctx.getStop().getLine();
         Node specNode = new Node("SPEC", specStartLine, nodeStack.peek());
         specNode.endLine = specEndLine;
         
-        // $$ ... $$ 내용 추출 및 PL/pgSQL 파싱 ($$가 있는 경우만)
         if (dollarLineNumber > 0) {
-        String plpgsqlCode = extractDollarQuotedString(ctx);
-        if (plpgsqlCode != null && !plpgsqlCode.trim().isEmpty()) {
-            
-            // PL/pgSQL 파싱 및 노드 트리 구축
-            parsePlpgsqlBlock(plpgsqlCode, dollarLineNumber);
+            String plpgsqlCode = extractDollarQuotedString(ctx);
+            if (plpgsqlCode != null && !plpgsqlCode.trim().isEmpty()) {
+                int leadingNewlines = countRemovedLeadingLines(plpgsqlCode);
+                int adjustedBaseLineNumber = dollarLineNumber + leadingNewlines - 1;
+                
+                parsePlpgsqlBlock(plpgsqlCode.trim(), adjustedBaseLineNumber);
             }
         }
     }
 
     /**
      * BeginDollarStringConstant 토큰이 있는 라인 번호 찾기
-     * @return $$ 토큰 다음 라인 번호, 없으면 -1
+     * @return $$ 토큰 라인 번호, 없으면 -1
      */
     private int findDollarStringLine(PostgreSQLParser.CreatefunctionstmtContext ctx) {
         int startIndex = ctx.getStart().getTokenIndex();
@@ -67,12 +65,11 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
         for (int i = startIndex; i <= stopIndex; i++) {
             Token token = tokens.get(i);
             if (token.getText().startsWith("$") && token.getText().endsWith("$")) {
-                // $$ 토큰 발견, 다음 라인이 PL/pgSQL 코드 시작
-                return token.getLine() + 1;
+                return token.getLine();
             }
         }
         
-        return -1;  // $$ 토큰 없음
+        return -1; 
     }
 
     @Override
@@ -90,7 +87,10 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
         if (dollarLineNumber > 0) {
             String plpgsqlCode = extractDollarQuotedStringForDo(ctx);
             if (plpgsqlCode != null && !plpgsqlCode.trim().isEmpty()) {
-                parsePlpgsqlBlock(plpgsqlCode, dollarLineNumber);
+                int leadingNewlines = countRemovedLeadingLines(plpgsqlCode);
+                int adjustedBaseLineNumber = dollarLineNumber + leadingNewlines - 1;
+                
+                parsePlpgsqlBlock(plpgsqlCode.trim(), adjustedBaseLineNumber);
             }
         }
     }
@@ -110,7 +110,7 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
         for (int i = startIndex; i <= stopIndex; i++) {
             Token token = tokens.get(i);
             if (token.getText().startsWith("$") && token.getText().endsWith("$")) {
-                return token.getLine() + 1;
+                return token.getLine();
             }
         }
         
@@ -165,9 +165,35 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
             content.append(dollarText.getText());
         }
         
-        return content.toString().trim();
+        return content.toString();
     }
 
+    /**
+     * trim()이 앞쪽에서 제거한 줄바꿈 개수를 계산
+     */
+    private int countRemovedLeadingLines(String text) {
+        int count = 0;
+        int i = 0;
+        
+        while (i < text.length() && Character.isWhitespace(text.charAt(i))) {
+            char c = text.charAt(i);
+            if (c == '\r') {
+                count++;
+                i++;
+                if (i < text.length() && text.charAt(i) == '\n') {
+                    i++;
+                }
+            } else if (c == '\n') {
+                count++;
+                i++;
+            } else {
+                i++;
+            }
+        }
+        
+        return count;
+    }
+    
     /**
      * PL/pgSQL 코드를 파싱하고 Node 트리에 추가
      */
@@ -568,8 +594,6 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     // SELECT
     @Override
     public void enterSelectstmt(PostgreSQLParser.SelectstmtContext ctx) {
-        // INSERT 내부의 VALUES를 위한 SELECT는 무시
-        // EXPLAIN 내부의 SELECT는 무시 (EXPLAIN의 대상일 뿐)
         if (insideInsert || insideExplain) {
             return;
         }
@@ -578,8 +602,6 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
 
     @Override
     public void exitSelectstmt(PostgreSQLParser.SelectstmtContext ctx) {
-        // INSERT 내부의 VALUES를 위한 SELECT는 무시
-        // EXPLAIN 내부의 SELECT는 무시
         if (insideInsert || insideExplain) {
             return;
         }
@@ -589,14 +611,14 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     // INSERT
     @Override
     public void enterInsertstmt(PostgreSQLParser.InsertstmtContext ctx) {
-        insideInsert = true;  // INSERT 시작
+        insideInsert = true;
         enterStatement("INSERT", ctx.getStart().getLine());
     }
 
     @Override
     public void exitInsertstmt(PostgreSQLParser.InsertstmtContext ctx) {
         exitStatement("INSERT", ctx.getStop().getLine());
-        insideInsert = false;  // INSERT 종료
+        insideInsert = false;
     }
 
     // UPDATE
@@ -632,7 +654,6 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
         exitStatement("MERGE", ctx.getStop().getLine());
     }
 
-    // MERGE - INSERT clause (WHEN NOT MATCHED THEN INSERT)
     @Override
     public void enterMerge_insert_clause(PostgreSQLParser.Merge_insert_clauseContext ctx) {
         enterStatement("MERGE_INSERT", ctx.getStart().getLine());
@@ -643,7 +664,6 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
         exitStatement("MERGE_INSERT", ctx.getStop().getLine());
     }
 
-    // MERGE - UPDATE clause (WHEN MATCHED THEN UPDATE)
     @Override
     public void enterMerge_update_clause(PostgreSQLParser.Merge_update_clauseContext ctx) {
         enterStatement("MERGE_UPDATE", ctx.getStart().getLine());
@@ -654,7 +674,6 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
         exitStatement("MERGE_UPDATE", ctx.getStop().getLine());
     }
 
-    // MERGE - DELETE clause (WHEN MATCHED THEN DELETE)
     @Override
     public void enterMerge_delete_clause(PostgreSQLParser.Merge_delete_clauseContext ctx) {
         enterStatement("MERGE_DELETE", ctx.getStart().getLine());
@@ -764,14 +783,14 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
     // EXPLAIN
     @Override
     public void enterExplainstmt(PostgreSQLParser.ExplainstmtContext ctx) {
-        insideExplain = true;  // EXPLAIN 시작
+        insideExplain = true;
         enterStatement("EXPLAIN", ctx.getStart().getLine());
     }
 
     @Override
     public void exitExplainstmt(PostgreSQLParser.ExplainstmtContext ctx) {
         exitStatement("EXPLAIN", ctx.getStop().getLine());
-        insideExplain = false;  // EXPLAIN 종료
+        insideExplain = false; 
     }
 
     // PREPARE
@@ -840,15 +859,16 @@ public class CustomPostgreSQLListener extends PostgreSQLParserBaseListener {
         exitStatement("COMMENT", ctx.getStop().getLine());
     }
 
-    // CASE (SQL expression)
     @Override
     public void enterCase_expr(PostgreSQLParser.Case_exprContext ctx) {
-        enterStatement("CASE", ctx.getStart().getLine());
+        // SQL의 CASE 표현식은 노드로 만들지 않음 (DML 문의 일부로 처리)
+        // enterStatement("CASE", ctx.getStart().getLine());
     }
 
     @Override
     public void exitCase_expr(PostgreSQLParser.Case_exprContext ctx) {
-        exitStatement("CASE", ctx.getStop().getLine());
+        // SQL의 CASE 표현식은 노드로 만들지 않음
+        // exitStatement("CASE", ctx.getStop().getLine());
     }
 
     // 트리 구조 출력

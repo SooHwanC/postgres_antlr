@@ -797,6 +797,16 @@ public interface PlpgsqlParserListener extends ParseTreeListener {
 	 */
 	void exitFunctionCall(PlpgsqlParser.FunctionCallContext ctx);
 	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#functionCallArgs}.
+	 * @param ctx the parse tree
+	 */
+	void enterFunctionCallArgs(PlpgsqlParser.FunctionCallArgsContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#functionCallArgs}.
+	 * @param ctx the parse tree
+	 */
+	void exitFunctionCallArgs(PlpgsqlParser.FunctionCallArgsContext ctx);
+	/**
 	 * Enter a parse tree produced by {@link PlpgsqlParser#windowFunction}.
 	 * @param ctx the parse tree
 	 */
@@ -816,6 +826,16 @@ public interface PlpgsqlParserListener extends ParseTreeListener {
 	 * @param ctx the parse tree
 	 */
 	void exitWindowSpec(PlpgsqlParser.WindowSpecContext ctx);
+	/**
+	 * Enter a parse tree produced by {@link PlpgsqlParser#cteStmt}.
+	 * @param ctx the parse tree
+	 */
+	void enterCteStmt(PlpgsqlParser.CteStmtContext ctx);
+	/**
+	 * Exit a parse tree produced by {@link PlpgsqlParser#cteStmt}.
+	 * @param ctx the parse tree
+	 */
+	void exitCteStmt(PlpgsqlParser.CteStmtContext ctx);
 	/**
 	 * Enter a parse tree produced by {@link PlpgsqlParser#sqlGenericStmt}.
 	 * @param ctx the parse tree

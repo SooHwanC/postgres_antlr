@@ -484,6 +484,12 @@ public interface PlpgsqlParserVisitor<T> extends ParseTreeVisitor<T> {
 	 */
 	T visitFunctionCall(PlpgsqlParser.FunctionCallContext ctx);
 	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#functionCallArgs}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitFunctionCallArgs(PlpgsqlParser.FunctionCallArgsContext ctx);
+	/**
 	 * Visit a parse tree produced by {@link PlpgsqlParser#windowFunction}.
 	 * @param ctx the parse tree
 	 * @return the visitor result
@@ -495,6 +501,12 @@ public interface PlpgsqlParserVisitor<T> extends ParseTreeVisitor<T> {
 	 * @return the visitor result
 	 */
 	T visitWindowSpec(PlpgsqlParser.WindowSpecContext ctx);
+	/**
+	 * Visit a parse tree produced by {@link PlpgsqlParser#cteStmt}.
+	 * @param ctx the parse tree
+	 * @return the visitor result
+	 */
+	T visitCteStmt(PlpgsqlParser.CteStmtContext ctx);
 	/**
 	 * Visit a parse tree produced by {@link PlpgsqlParser#sqlGenericStmt}.
 	 * @param ctx the parse tree
