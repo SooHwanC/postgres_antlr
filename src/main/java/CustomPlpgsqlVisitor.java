@@ -213,16 +213,20 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
         
         // ELSIF 절들
         int elsifCount = ctx.expression().size() - 1; 
-        for (int i = 0; i < elsifCount; i++) {
-            PlpgsqlParser.StatementListContext elsifStmtList = ctx.statementList(i + 1);
-            int elsifStartLine = getActualLineNumber(elsifStmtList);
-            int elsifEndLine = getActualEndLineNumber(elsifStmtList);
-            
-            Node elsifNode = new Node("ELSIF", elsifStartLine, ifNode);
-            elsifNode.endLine = elsifEndLine;
-            
-            currentBlockNode = elsifNode;
-            visitStatementList(elsifStmtList);
+        if (elsifCount > 0 && ctx.ELSIF() != null) {
+            for (int i = 0; i < elsifCount; i++) {
+                PlpgsqlParser.StatementListContext elsifStmtList = ctx.statementList(i + 1);
+                
+                // ELSIF 키워드의 실제 라인 번호 사용
+                int elsifStartLine = getActualLineNumber(ctx.ELSIF(i).getSymbol());
+                int elsifEndLine = getActualEndLineNumber(elsifStmtList);
+                
+                Node elsifNode = new Node("ELSIF", elsifStartLine, ifNode);
+                elsifNode.endLine = elsifEndLine;
+                
+                currentBlockNode = elsifNode;
+                visitStatementList(elsifStmtList);
+            }
         }
         
         // ELSE 절
