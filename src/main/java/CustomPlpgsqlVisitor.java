@@ -52,25 +52,64 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     
     @Override
     public Node visitPlpgsqlBlock(PlpgsqlParser.PlpgsqlBlockContext ctx) {
-        // PLPGSQL_BLOCK과 LABEL 노드를 만들지 않고, 직접 내용만 추가
-        currentBlockNode = parentNode;
-        
-        // DECLARE 섹션
-        if (ctx.declareSection() != null) {
-            visit(ctx.declareSection());
+        // 최초 호출 시 currentBlockNode가 null이면 parentNode로 초기화
+        if (currentBlockNode == null) {
+            currentBlockNode = parentNode;
         }
         
-        // BEGIN ... END 섹션
-        if (ctx.statementList() != null) {
-            visitStatementList(ctx.statementList());
+        // BEGIN 블록 노드 생성
+        Node beginNode = null;
+        
+        // BEGIN 키워드의 위치를 찾아서 노드 생성
+        if (ctx.BEGIN() != null) {
+            int beginStartLine = getActualLineNumber(ctx.BEGIN().getSymbol());
+            int beginEndLine = getActualEndLineNumber(ctx);
+            
+            beginNode = new Node("BEGIN", beginStartLine, currentBlockNode);
+            beginNode.endLine = beginEndLine;
+            
+            // BEGIN 블록 내부를 처리하기 위해 currentBlockNode를 beginNode로 설정
+            Node previousBlock = currentBlockNode;
+            currentBlockNode = beginNode;
+            
+            // DECLARE 섹션
+            if (ctx.declareSection() != null) {
+                visit(ctx.declareSection());
+            }
+            
+            // BEGIN ... END 섹션
+            if (ctx.statementList() != null) {
+                visitStatementList(ctx.statementList());
+            }
+            
+            // EXCEPTION 섹션
+            if (ctx.exceptionSection() != null) {
+                visit(ctx.exceptionSection());
+            }
+            
+            // 이전 블록으로 복원
+            currentBlockNode = previousBlock;
+        } else {
+            // BEGIN이 없는 경우 (최상위 블록) - 기존 방식 유지
+            currentBlockNode = parentNode;
+            
+            // DECLARE 섹션
+            if (ctx.declareSection() != null) {
+                visit(ctx.declareSection());
+            }
+            
+            // BEGIN ... END 섹션
+            if (ctx.statementList() != null) {
+                visitStatementList(ctx.statementList());
+            }
+            
+            // EXCEPTION 섹션
+            if (ctx.exceptionSection() != null) {
+                visit(ctx.exceptionSection());
+            }
         }
         
-        // EXCEPTION 섹션
-        if (ctx.exceptionSection() != null) {
-            visit(ctx.exceptionSection());
-        }
-        
-        return null;
+        return beginNode;
     }
     
     @Override
@@ -131,14 +170,8 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     
     @Override
     public Node visitRaiseStmt(PlpgsqlParser.RaiseStmtContext ctx) {
-        String level = "LOG";
-        if (ctx.NOTICE() != null) level = "NOTICE";
-        else if (ctx.WARNING() != null) level = "WARNING";
-        else if (ctx.INFO() != null) level = "INFO";
-        else if (ctx.DEBUG() != null) level = "DEBUG";
-        else if (ctx.EXCEPTION() != null) level = "EXCEPTION";
-        
-        Node raiseNode = createNode("RAISE", ctx, currentBlockNode);
+
+        Node raiseNode = createNode("NOTICE", ctx, currentBlockNode);
         return raiseNode;
     }
     
@@ -430,9 +463,25 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     
     @Override
     public Node visitSqlGenericStmt(PlpgsqlParser.SqlGenericStmtContext ctx) {
+        // CALL 문 처리
         if (ctx.CALL() != null) {
             Node callNode = createNode("CALL", ctx, currentBlockNode);
             return callNode;
+        }
+        
+        // 구문 텍스트 확인
+        String stmtText = ctx.getText().toUpperCase();
+        
+        // CREATE INDEX 문 처리
+        if (stmtText.startsWith("CREATEINDEX") || stmtText.contains("CREATEINDEX")) {
+            Node createIndexNode = createNode("CREATE_INDEX", ctx, currentBlockNode);
+            return createIndexNode;
+        }
+        
+        // DROP TABLE 문 처리
+        if (stmtText.startsWith("DROPTABLE") || stmtText.contains("DROPTABLE")) {
+            Node dropTableNode = createNode("DROP_TABLE", ctx, currentBlockNode);
+            return dropTableNode;
         }
         
         Node sqlNode = createNode("SQL_GENERIC", ctx, currentBlockNode);
