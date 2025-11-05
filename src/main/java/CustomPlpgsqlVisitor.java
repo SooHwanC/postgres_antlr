@@ -57,6 +57,13 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
             currentBlockNode = parentNode;
         }
         
+        Node previousBlock = currentBlockNode;
+        
+        // DECLARE 섹션은 항상 현재 블록의 자식으로 (BEGIN과 형제 관계)
+        if (ctx.declareSection() != null) {
+            visit(ctx.declareSection());
+        }
+        
         // BEGIN 블록 노드 생성
         Node beginNode = null;
         
@@ -65,45 +72,28 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
             int beginStartLine = getActualLineNumber(ctx.BEGIN().getSymbol());
             int beginEndLine = getActualEndLineNumber(ctx);
             
-            beginNode = new Node("BEGIN", beginStartLine, currentBlockNode);
+            beginNode = new Node("BEGIN", beginStartLine, previousBlock);
             beginNode.endLine = beginEndLine;
             
-            // BEGIN 블록 내부를 처리하기 위해 currentBlockNode를 beginNode로 설정
-            Node previousBlock = currentBlockNode;
+            // BEGIN 블록 내부의 statements만 처리
             currentBlockNode = beginNode;
             
-            // DECLARE 섹션
-            if (ctx.declareSection() != null) {
-                visit(ctx.declareSection());
-            }
-            
-            // BEGIN ... END 섹션
             if (ctx.statementList() != null) {
                 visitStatementList(ctx.statementList());
             }
             
-            // EXCEPTION 섹션
+            // EXCEPTION 섹션도 BEGIN 내부
             if (ctx.exceptionSection() != null) {
                 visit(ctx.exceptionSection());
             }
             
-            // 이전 블록으로 복원
             currentBlockNode = previousBlock;
         } else {
-            // BEGIN이 없는 경우 (최상위 블록) - 기존 방식 유지
-            currentBlockNode = parentNode;
-            
-            // DECLARE 섹션
-            if (ctx.declareSection() != null) {
-                visit(ctx.declareSection());
-            }
-            
-            // BEGIN ... END 섹션
+            // BEGIN이 없는 경우 (최상위 블록) - statementList만 처리
             if (ctx.statementList() != null) {
                 visitStatementList(ctx.statementList());
             }
             
-            // EXCEPTION 섹션
             if (ctx.exceptionSection() != null) {
                 visit(ctx.exceptionSection());
             }
@@ -348,6 +338,7 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
     public Node visitNestedBlock(PlpgsqlParser.NestedBlockContext ctx) {
         Node previousBlock = currentBlockNode;
         
+        // DECLARE 섹션 처리 (있는 경우)
         if (ctx.declarationList() != null) {
             PlpgsqlParser.DeclarationListContext declList = ctx.declarationList();
             
@@ -367,6 +358,16 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
             }
         }
         
+        // BEGIN 블록 생성
+        int beginStartLine = getActualLineNumber(ctx.BEGIN().getSymbol());
+        int beginEndLine = getActualEndLineNumber(ctx);
+        
+        Node beginNode = new Node("BEGIN", beginStartLine, currentBlockNode);
+        beginNode.endLine = beginEndLine;
+        
+        // BEGIN 블록 내부 처리
+        currentBlockNode = beginNode;
+        
         visitStatementList(ctx.statementList());
         
         if (ctx.exceptionSection() != null) {
@@ -374,7 +375,7 @@ public class CustomPlpgsqlVisitor extends PlpgsqlParserBaseVisitor<Node> {
         }
         
         currentBlockNode = previousBlock;
-        return null;
+        return beginNode;
     }
     
     @Override
