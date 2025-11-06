@@ -1,0 +1,531 @@
+package plsql;
+
+import java.util.Stack;
+import org.antlr.v4.runtime.TokenStream;
+
+public class CustomPlSqlListener extends PlSqlParserBaseListener {
+    @SuppressWarnings("unused")
+    private TokenStream tokens;
+    private Stack<Node> nodeStack = new Stack<>();
+    private Node root = new Node("FILE", 0, null); // 루트 노드
+
+    public Node getRoot() {
+        return root;
+    }
+
+    public CustomPlSqlListener(TokenStream tokens) {
+        this.tokens = tokens;
+        nodeStack.push(root); // 초기 상태에서 루트 노드를 스택에 푸시
+    }
+
+    private void enterStatement(String statementType, int line) {
+        Node currentNode = new Node(statementType, line, nodeStack.peek());
+        nodeStack.push(currentNode);
+        // System.out.println("Enter " + statementType + " Statement Line: " + line);
+    }
+
+    private void exitStatement(String statementType, int line) {
+        Node node = nodeStack.pop();
+        node.endLine = line;
+        // 동일 범위(시작/끝 라인 동일)의 중복 자식 제거
+        if (node.children != null && !node.children.isEmpty()) {
+            node.children.removeIf(child -> child.startLine == node.startLine && child.endLine == node.endLine);
+        }
+        // System.out.println("Exit " + statementType + " Statement Line: " + line);
+    }
+
+    /* ------------------------------------------------------------ */
+    /* Procedure/Function/Trigger/Package 관련 리스너 모음 */
+    /* ------------------------------------------------------------ */
+    @Override
+    public void enterCreate_procedure_body(PlSqlParser.Create_procedure_bodyContext ctx) {
+        enterStatement("PROCEDURE", ctx.getStart().getLine());
+        enterStatement("SPEC", ctx.getStart().getLine());
+        
+        if (ctx.IS() != null) {
+            exitStatement("SPEC", ctx.IS().getSymbol().getLine());
+        } else if (ctx.AS() != null) {
+            exitStatement("SPEC", ctx.AS().getSymbol().getLine());
+        }
+    }
+
+    @Override
+    public void exitCreate_procedure_body(PlSqlParser.Create_procedure_bodyContext ctx) {
+        exitStatement("PROCEDURE", ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterCreate_function_body(PlSqlParser.Create_function_bodyContext ctx) {
+        enterStatement("FUNCTION", ctx.getStart().getLine());
+        enterStatement("SPEC", ctx.getStart().getLine());
+        if (ctx.IS() != null) {
+            exitStatement("SPEC", ctx.IS().getSymbol().getLine());
+        } else if (ctx.AS() != null) {
+            exitStatement("SPEC", ctx.AS().getSymbol().getLine());
+        }
+    }
+
+    @Override
+    public void exitCreate_function_body(PlSqlParser.Create_function_bodyContext ctx) {
+        exitStatement("FUNCTION", ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterPackage_obj_spec(PlSqlParser.Package_obj_specContext ctx) {
+        String text = ctx.getText().toUpperCase().trim();
+        
+        // FUNCTION이나 PROCEDURE로 시작하면 무시하고 리턴
+        if (text.startsWith("FUNCTION") || text.startsWith("PROCEDURE")) {
+            return;
+        }
+        
+        // 그 외의 경우만 PACKAGE_VARIABLE로 처리
+        enterStatement("PACKAGE_VARIABLE", ctx.getStart().getLine());
+    }
+    
+    @Override
+    public void exitPackage_obj_spec(PlSqlParser.Package_obj_specContext ctx) {
+        String text = ctx.getText().toUpperCase().trim();
+        
+        // FUNCTION이나 PROCEDURE로 시작하면 무시하고 리턴
+        if (text.startsWith("FUNCTION") || text.startsWith("PROCEDURE")) {
+            return;
+        }
+        
+        // 그 외의 경우만 PACKAGE_VARIABLE로 처리
+        exitStatement("PACKAGE_VARIABLE", ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterPackage_obj_body(PlSqlParser.Package_obj_bodyContext ctx) {
+        // FUNCTION 또는 PROCEDURE 타입 결정
+        // function_body가 null이 아니면 "FUNCTION", null이면 "PROCEDURE"
+        String memberType = ctx.function_body() != null ? "FUNCTION" : "PROCEDURE";
+        
+        // 1. 전체 함수/프로시저의 부모 노드 생성
+        // nodeStack: [ROOT] -> [ROOT, FUNCTION/PROCEDURE]
+        // 이때 FUNCTION/PROCEDURE의 parent는 ROOT가 됨
+        enterStatement(memberType, ctx.getStart().getLine());
+        
+        // 2. IS/AS 이전까지의 선언부를 SPEC 노드로 생성
+        // nodeStack: [ROOT, FUNCTION/PROCEDURE] -> [ROOT, FUNCTION/PROCEDURE, SPEC]
+        enterStatement("SPEC", ctx.getStart().getLine());
+    
+        // IS나 AS를 만나면 SPEC 노드를 종료 (선언부 끝)
+        // nodeStack: [ROOT, FUNCTION/PROCEDURE, SPEC] -> [ROOT, FUNCTION/PROCEDURE]
+        Object bodyCtx = ctx.function_body() != null ? ctx.function_body() : ctx.procedure_body();
+        if (bodyCtx instanceof PlSqlParser.Function_bodyContext) {
+            PlSqlParser.Function_bodyContext funcCtx = (PlSqlParser.Function_bodyContext) bodyCtx;
+            exitStatement("SPEC", (funcCtx.IS() != null ? funcCtx.IS() : funcCtx.AS()).getSymbol().getLine());
+        } else {
+            PlSqlParser.Procedure_bodyContext procCtx = (PlSqlParser.Procedure_bodyContext) bodyCtx;
+            exitStatement("SPEC", (procCtx.IS() != null ? procCtx.IS() : procCtx.AS()).getSymbol().getLine());
+        }
+    }
+
+    @Override
+    public void exitPackage_obj_body(PlSqlParser.Package_obj_bodyContext ctx) {
+        String memberType = ctx.function_body() != null ? "FUNCTION" : "PROCEDURE";
+        exitStatement(memberType, ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterCreate_trigger(PlSqlParser.Create_triggerContext ctx) {
+        enterStatement("TRIGGER", ctx.getStart().getLine());
+        enterStatement("SPEC", ctx.getStart().getLine());
+    }
+    @Override
+    public void exitCreate_trigger(PlSqlParser.Create_triggerContext ctx) {
+        exitStatement("SPEC", ctx.getStop().getLine());
+    }
+    @Override
+    public void enterTrigger_block(PlSqlParser.Trigger_blockContext ctx) {
+        exitStatement("SPEC", ctx.getStart().getLine() - 1);
+        enterStatement("TRIGGER_BLOCK", ctx.getStart().getLine());
+    }
+    @Override
+    public void exitTrigger_block(PlSqlParser.Trigger_blockContext ctx) {
+        exitStatement("TRIGGER_BLOCK", ctx.getStop().getLine());
+    }
+
+    /* ------------------------------------------------------------ */
+    /* DECLARE/ASSIGNMENT/RETURN 변수 관련 리스너 모음 */
+    /* ------------------------------------------------------------ */
+    @Override
+    public void enterSeq_of_declare_specs(PlSqlParser.Seq_of_declare_specsContext ctx) {
+        enterStatement("DECLARE", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitSeq_of_declare_specs(PlSqlParser.Seq_of_declare_specsContext ctx) {
+        exitStatement("DECLARE", ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterAssignment_statement(PlSqlParser.Assignment_statementContext ctx) {
+        enterStatement("ASSIGNMENT", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitAssignment_statement(PlSqlParser.Assignment_statementContext ctx) {
+        exitStatement("ASSIGNMENT", ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterReturn_statement(PlSqlParser.Return_statementContext ctx) {
+        enterStatement("RETURN", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitReturn_statement(PlSqlParser.Return_statementContext ctx) {
+        exitStatement("RETURN", ctx.getStop().getLine());
+    }
+
+    /* ------------------------------------------------------------ */
+    /* INSERT/UPDATE/DELETE/MERGE/SELECT 관련 리스너 모음 */
+    /* ------------------------------------------------------------ */
+
+    @Override
+    public void enterQuery_block(PlSqlParser.Query_blockContext ctx) {
+        enterStatement("SELECT", ctx.getStart().getLine());
+    }
+    @Override
+    public void exitQuery_block(PlSqlParser.Query_blockContext ctx) {
+        exitStatement("SELECT", ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterInsert_statement(PlSqlParser.Insert_statementContext ctx) {
+        enterStatement("INSERT", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitInsert_statement(PlSqlParser.Insert_statementContext ctx) {
+        exitStatement("INSERT", ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterUpdate_statement(PlSqlParser.Update_statementContext ctx) {
+        enterStatement("UPDATE", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitUpdate_statement(PlSqlParser.Update_statementContext ctx) {
+        exitStatement("UPDATE", ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterDelete_statement(PlSqlParser.Delete_statementContext ctx) {
+        enterStatement("DELETE", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitDelete_statement(PlSqlParser.Delete_statementContext ctx) {
+        exitStatement("DELETE", ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterMerge_statement(PlSqlParser.Merge_statementContext ctx) {
+        enterStatement("MERGE", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitMerge_statement(PlSqlParser.Merge_statementContext ctx) {
+        exitStatement("MERGE", ctx.getStop().getLine());
+    }
+
+    // MERGE 하위 WHEN 절: UPDATE
+    @Override
+    public void enterMerge_update_clause(PlSqlParser.Merge_update_clauseContext ctx) {
+        enterStatement("UPDATE", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitMerge_update_clause(PlSqlParser.Merge_update_clauseContext ctx) {
+        exitStatement("UPDATE", ctx.getStop().getLine());
+    }
+
+    // MERGE 하위 WHEN 절: INSERT
+    @Override
+    public void enterMerge_insert_clause(PlSqlParser.Merge_insert_clauseContext ctx) {
+        enterStatement("INSERT", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitMerge_insert_clause(PlSqlParser.Merge_insert_clauseContext ctx) {
+        exitStatement("INSERT", ctx.getStop().getLine());
+    }
+
+    // MERGE 하위 UPDATE 절 내의 선택적 DELETE WHERE
+    @Override
+    public void enterMerge_update_delete_part(PlSqlParser.Merge_update_delete_partContext ctx) {
+        enterStatement("DELETE", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitMerge_update_delete_part(PlSqlParser.Merge_update_delete_partContext ctx) {
+        exitStatement("DELETE", ctx.getStop().getLine());
+    }
+
+    /* ------------------------------------------------------------ */
+    /* IF/ELSIF/ELSE/LOOP 관련 리스너 모음 */
+    /* ------------------------------------------------------------ */
+    @Override
+    public void enterIf_statement(PlSqlParser.If_statementContext ctx) {
+        enterStatement("IF", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitIf_statement(PlSqlParser.If_statementContext ctx) {
+        exitStatement("IF", ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterElsif_part(PlSqlParser.Elsif_partContext ctx) {
+        enterStatement("ELSIF", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitElsif_part(PlSqlParser.Elsif_partContext ctx) {
+        exitStatement("ELSIF", ctx.getStop().getLine());
+    }
+    
+    @Override
+    public void enterElse_part(PlSqlParser.Else_partContext ctx) {
+        enterStatement("ELSE", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitElse_part(PlSqlParser.Else_partContext ctx) {
+        exitStatement("ELSE", ctx.getStop().getLine());
+    }
+    
+    @Override
+    public void enterLoop_statement(PlSqlParser.Loop_statementContext ctx) {
+        enterStatement("LOOP", ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitLoop_statement(PlSqlParser.Loop_statementContext ctx) {
+        exitStatement("LOOP", ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterSingle_column_for_loop(PlSqlParser.Single_column_for_loopContext ctx) {
+        enterStatement("LOOP", ctx.getStart().getLine());
+    }
+    @Override
+    public void exitSingle_column_for_loop(PlSqlParser.Single_column_for_loopContext ctx) {
+        exitStatement("LOOP", ctx.getStop().getLine());
+    }
+    
+    @Override
+    public void enterMulti_column_for_loop(PlSqlParser.Multi_column_for_loopContext ctx) {
+        enterStatement("LOOP", ctx.getStart().getLine());
+    }
+    @Override
+    public void exitMulti_column_for_loop(PlSqlParser.Multi_column_for_loopContext ctx) {
+        exitStatement("LOOP", ctx.getStop().getLine());
+    }
+
+    /* ------------------------------------------------------------ */
+    /* EXCEPTION 관련 리스너 모음 */
+    /* ------------------------------------------------------------ */
+    @Override
+    public void enterException_handler(PlSqlParser.Exception_handlerContext ctx) {
+        if (!"EXCEPTION".equals(nodeStack.peek().type)) { // 첫 핸들러라면
+            enterStatement("EXCEPTION", ctx.getStart().getLine() -1);
+        }
+    }
+    
+    @Override
+    public void exitException_handler(PlSqlParser.Exception_handlerContext ctx) {
+        // no-op: 핸들러마다 닫지 않음
+    }
+    
+    @Override
+    public void exitBody(PlSqlParser.BodyContext ctx) {
+        if (!nodeStack.isEmpty() && "EXCEPTION".equals(nodeStack.peek().type)) {
+            exitStatement("EXCEPTION", ctx.getStop().getLine());
+        }
+    }
+
+    @Override
+    public void enterSeq_of_statements(PlSqlParser.Seq_of_statementsContext ctx) {
+        String text = ctx.getText();
+        
+        // BEGIN-END 블록의 내용인 경우
+        if (!text.contains("BEGIN") && 
+            ctx.getParent() instanceof PlSqlParser.BodyContext && 
+            ctx.getParent().getParent() instanceof PlSqlParser.StatementContext) {
+            // 옵션 B: TRY 시작 라인을 BEGIN 토큰 라인으로 고정
+            PlSqlParser.BodyContext bodyCtx = (PlSqlParser.BodyContext) ctx.getParent();
+            int beginLine = bodyCtx.BEGIN().getSymbol().getLine();
+            enterStatement("TRY", beginLine);
+        }
+    }
+    
+
+    @Override
+    public void exitSeq_of_statements(PlSqlParser.Seq_of_statementsContext ctx) {
+        String text = ctx.getText();
+
+        // BEGIN-END 블록의 내용인 경우
+        if (!text.contains("BEGIN") && 
+            ctx.getParent() instanceof PlSqlParser.BodyContext && 
+            ctx.getParent().getParent() instanceof PlSqlParser.StatementContext) {
+            exitStatement("TRY", ctx.getStop().getLine());
+        }
+    }
+    
+    @Override
+    public void enterCall_statement(PlSqlParser.Call_statementContext ctx) {
+        String statementType = "CALL";
+        if (!ctx.routine_name().isEmpty()) {
+            PlSqlParser.Routine_nameContext routineName = ctx.routine_name(0); 
+            if (routineName.getText().toUpperCase().contains("RAISE")) {
+                // statementType = "RAISE";
+                return;
+            }
+        }
+        enterStatement(statementType, ctx.getStart().getLine());
+    }
+    
+    @Override
+    public void exitCall_statement(PlSqlParser.Call_statementContext ctx) {
+        String statementType = "CALL";
+        if (!ctx.routine_name().isEmpty()) {
+            PlSqlParser.Routine_nameContext routineName = ctx.routine_name(0);
+            if (routineName.getText().toUpperCase().contains("RAISE")) {
+                // statementType = "RAISE";
+                return;
+            }
+        }
+        exitStatement(statementType, ctx.getStop().getLine());
+    }
+
+    /* ------------------------------------------------------------ */
+    /* CURSOR 관련 리스너 모음 */
+    /* ------------------------------------------------------------ */
+    @Override
+    public void enterOpen_statement(PlSqlParser.Open_statementContext ctx) {
+        enterStatement("OPEN_CURSOR", ctx.getStart().getLine());
+    }
+    @Override
+    public void exitOpen_statement(PlSqlParser.Open_statementContext ctx) {
+        exitStatement("OPEN_CURSOR", ctx.getStop().getLine());
+    }
+    
+    @Override
+    public void enterFetch_statement(PlSqlParser.Fetch_statementContext ctx) {
+        enterStatement("FETCH", ctx.getStart().getLine());
+    }
+    @Override
+    public void exitFetch_statement(PlSqlParser.Fetch_statementContext ctx) {
+        exitStatement("FETCH", ctx.getStop().getLine());
+    }
+    
+    @Override
+    public void enterClose_statement(PlSqlParser.Close_statementContext ctx) {
+        enterStatement("CLOSE_CURSOR", ctx.getStart().getLine());
+    }
+    @Override
+    public void exitClose_statement(PlSqlParser.Close_statementContext ctx) {
+        exitStatement("CLOSE_CURSOR", ctx.getStop().getLine());
+    }
+    
+    @Override
+    public void enterOpen_for_statement(PlSqlParser.Open_for_statementContext ctx) {
+        enterStatement("OPEN_CURSOR", ctx.getStart().getLine());
+    }
+    @Override
+    public void exitOpen_for_statement(PlSqlParser.Open_for_statementContext ctx) {
+        exitStatement("OPEN_CURSOR", ctx.getStop().getLine());
+    }
+    
+    @Override
+    public void enterExit_statement(PlSqlParser.Exit_statementContext ctx) {
+        enterStatement("EXIT", ctx.getStart().getLine());
+    }
+    @Override
+    public void exitExit_statement(PlSqlParser.Exit_statementContext ctx) {
+        exitStatement("EXIT", ctx.getStop().getLine());
+    }
+    
+
+    /* ------------------------------------------------------------ */
+    /* WITH/CTE/JOIN/EXECUTE_IMMEDIATE/COMMIT 관련 리스너 모음 */
+    /* ------------------------------------------------------------ */
+
+    @Override
+    public void enterSubquery_factoring_clause(PlSqlParser.Subquery_factoring_clauseContext ctx) {
+        enterStatement("CTE", ctx.getStart().getLine());
+    }
+    @Override
+    public void exitSubquery_factoring_clause(PlSqlParser.Subquery_factoring_clauseContext ctx) {
+        exitStatement("CTE", ctx.getStop().getLine());
+    }
+    
+    @Override
+    public void enterJoin_clause(PlSqlParser.Join_clauseContext ctx) {
+        enterStatement("JOIN", ctx.getStart().getLine());
+    }
+    @Override
+    public void exitJoin_clause(PlSqlParser.Join_clauseContext ctx) {
+        exitStatement("JOIN", ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterSubquery_operation_part(PlSqlParser.Subquery_operation_partContext ctx) {
+        String t = ctx.getText().toUpperCase();
+        String type = t.contains("UNIONALL") ? "UNION_ALL"
+                : t.contains("UNION")     ? "UNION"
+                : t.contains("INTERSECT") ? "INTERSECT"
+                : t.contains("MINUS")     ? "MINUS"
+                : "SET_OPERATION";
+        enterStatement(type, ctx.getStart().getLine());
+    }
+
+    @Override
+    public void exitSubquery_operation_part(PlSqlParser.Subquery_operation_partContext ctx) {
+        String t = ctx.getText().toUpperCase();
+        String type = t.contains("UNION ALL") ? "UNION_ALL"
+                : t.contains("UNION")     ? "UNION"
+                : t.contains("INTERSECT") ? "INTERSECT"
+                : t.contains("MINUS")     ? "MINUS"
+                : "SET_OPERATION";
+        exitStatement(type, ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterExecute_immediate(PlSqlParser.Execute_immediateContext ctx) {
+        enterStatement("EXECUTE_IMMEDIATE", ctx.getStart().getLine());
+    }
+    @Override
+    public void exitExecute_immediate(PlSqlParser.Execute_immediateContext ctx) {
+        exitStatement("EXECUTE_IMMEDIATE", ctx.getStop().getLine());
+    }
+
+    @Override
+    public void enterCommit_statement(PlSqlParser.Commit_statementContext ctx) {
+        enterStatement("COMMIT", ctx.getStart().getLine());
+    }
+    
+    @Override
+    public void exitCommit_statement(PlSqlParser.Commit_statementContext ctx) {
+        exitStatement("COMMIT", ctx.getStop().getLine());
+    }
+
+    // 트리 구조를 출력하는 메서드 (디버깅 목적)
+    public void printTree(Node node, String indent) {
+        System.out.println(indent + node.type + " (" + node.startLine + ", " + node.endLine + ")");
+        for (Node child : node.children) {
+            printTree(child, indent + "  ");
+        }
+    }
+
+    // 트리 구조 출력을 위한 메서드 호출 예시
+    public void printStructure() {
+        printTree(root, "");
+    }
+}
