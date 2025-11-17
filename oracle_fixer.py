@@ -7,6 +7,7 @@ structure.json을 이용하여 큰 프로시저를 논리적 블록으로 나누
 
 import os
 import json
+import re
 import requests
 from pathlib import Path
 from typing import List, Dict, Any
@@ -16,7 +17,7 @@ from typing import List, Dict, Any
 # ============================================================================
 
 # 작업 폴더 경로 (SQL 파일과 JSON 파일이 있는 폴더)
-WORK_DIR = r"C:\Users\r"
+WORK_DIR = r"C:\Users\sh\Desktop\uengine_source\githubs\plsql-parser"
 
 # SQL 파일명 (작업 폴더 내)
 SQL_FILE_NAME = "plpgsql5.sql"
@@ -28,6 +29,9 @@ STRUCTURE_FILE_NAME = "structure.json"
 LLM_URL = "https://your-llm-api-endpoint.com/v1/chat/completions"
 LLM_API_KEY = "your-api-key-here"
 LLM_MODEL = "gpt-4.1"
+
+# 프롬프트 언어 ('ko' 또는 'en')
+PROMPT_LANGUAGE = "ko"
 
 # 블록당 최대 라인 수 (이 값을 조정하여 LLM 요청 크기 조절)
 MAX_LINES_PER_CHUNK = 200
@@ -342,23 +346,85 @@ class PlpgsqlToOracleConverter:
         """단일 청크를 Oracle로 변환"""
         print(f"  [{chunk_index}/{total_chunks}] 변환 중: {chunk['description']} (lines {chunk['startLine']}-{chunk['endLine']})")
         
-        system_message = """You are an expert database developer specializing in converting PostgreSQL PL/pgSQL to Oracle PL/SQL.
- 
- Key conversion rules:
- 1. Change PROCEDURE syntax from PostgreSQL to Oracle format
- 2. Convert data types: varchar → VARCHAR2, datetime → DATE or TIMESTAMP, etc.
- 3. Convert control structures: IF/LOOP/WHILE/FOR to Oracle syntax
- 4. Change function calls: EXTRACT() → appropriate Oracle functions, NOW() → SYSDATE, etc.
- 5. Convert temporary tables to Oracle global temporary tables or collections
- 6. Change RAISE INFO to DBMS_OUTPUT.PUT_LINE
- 7. Convert cursors and refcursors to Oracle syntax
- 8. Convert string operations: || concatenation, SUBSTRING, etc.
- 9. Handle exception blocks properly
- 10. Remove PostgreSQL-specific features like $procedure$ and replace with proper Oracle delimiters
- 
- Return ONLY the converted Oracle PL/SQL code without explanations."""
+        # 프롬프트 언어에 따라 메시지 선택
+        if PROMPT_LANGUAGE == "ko":
+            system_message = """당신은 PostgreSQL PL/pgSQL을 Oracle PL/SQL로 변환하는 전문 데이터베이스 개발자입니다.
 
-        user_message = f"""Convert the following PostgreSQL PL/pgSQL code segment to Oracle PL/SQL.
+주요 변환 규칙:
+1. 프로시저 구문: CREATE OR REPLACE PROCEDURE 이름(...) IS (AS $procedure$가 아님)
+2. 저장 프로시저에서 DECLARE 키워드를 사용하지 마세요 - 변수 선언은 IS/AS 다음에 바로 작성
+3. 데이터 타입: varchar → VARCHAR2, datetime → DATE 또는 TIMESTAMP, text → CLOB
+4. 제어 구조: IF/LOOP/WHILE/FOR를 유지하되 Oracle 구문으로 변환
+5. 함수: EXTRACT() → 적절한 Oracle 함수, NOW() → SYSDATE, CURRENT_TIMESTAMP → SYSTIMESTAMP
+6. 임시 테이블: GLOBAL TEMPORARY TABLE 또는 컬렉션(nested tables/varrays) 사용
+7. RAISE INFO → DBMS_OUTPUT.PUT_LINE
+8. 커서: refcursor → SYS_REFCURSOR, cursor FOR loop 구문
+9. 문자열 연산: || (동일), SUBSTRING → SUBSTR, POSITION → INSTR
+10. 예외 블록: EXCEPTION WHEN ... THEN (유사하지만 Oracle 예외 이름 확인)
+11. $procedure$, $function$ 구분자 제거
+12. systimestamp는 Oracle에도 있지만 SYSTIMESTAMP (대문자 권장)
+
+중요: 저장 프로시저에서는 DECLARE 키워드를 포함하지 마세요. 변수는 IS/AS 바로 다음에 선언합니다.
+
+변환된 Oracle PL/SQL 코드만 반환하고 설명은 하지 마세요."""
+
+            # DECLARE 블록일 때 특별한 지시 추가
+            if chunk['type'] == 'DECLARE':
+                user_message = f"""다음은 저장 프로시저의 최상위 변수 선언부입니다.
+Oracle에서는 CREATE PROCEDURE ... IS 다음에 DECLARE 키워드 없이 바로 변수를 선언합니다.
+
+다음 PostgreSQL 변수 선언을 Oracle로 변환하되, "declare" 또는 "DECLARE" 키워드는 절대 포함하지 마세요.
+변수 선언만 변환하여 반환하세요.
+
+PostgreSQL 코드:
+{chunk['text']}
+
+Oracle PL/SQL (DECLARE 키워드 없이 변수 선언만):"""
+            else:
+                user_message = f"""다음 PostgreSQL PL/pgSQL 코드를 Oracle PL/SQL로 변환하세요.
+이것은 전체 {total_chunks}개 중 {chunk_index}번째 부분입니다.
+블록 타입: {chunk['type']}
+설명: {chunk['description']}
+
+PostgreSQL 코드:
+{chunk['text']}
+
+Oracle PL/SQL:"""
+        else:
+            system_message = """You are an expert database developer specializing in converting PostgreSQL PL/pgSQL to Oracle PL/SQL.
+
+Key conversion rules:
+1. PROCEDURE syntax: CREATE OR REPLACE PROCEDURE name(...) IS (not AS $procedure$)
+2. DO NOT use DECLARE keyword in stored procedures - variable declarations go directly after IS/AS
+3. Data types: varchar → VARCHAR2, datetime → DATE or TIMESTAMP, text → CLOB
+4. Control structures: Keep IF/LOOP/WHILE/FOR but ensure proper Oracle syntax
+5. Functions: EXTRACT() → appropriate Oracle functions, NOW() → SYSDATE, CURRENT_TIMESTAMP → SYSTIMESTAMP
+6. Temporary tables: Use GLOBAL TEMPORARY TABLE or collections (nested tables/varrays)
+7. RAISE INFO → DBMS_OUTPUT.PUT_LINE
+8. Cursors: refcursor → SYS_REFCURSOR, cursor FOR loop syntax
+9. String operations: || (same), SUBSTRING → SUBSTR, POSITION → INSTR
+10. Exception blocks: EXCEPTION WHEN ... THEN (similar but check Oracle exception names)
+11. Remove $procedure$, $function$ delimiters
+12. systimestamp exists in Oracle, but use SYSTIMESTAMP (uppercase recommended)
+
+IMPORTANT: In stored procedures, do NOT include the DECLARE keyword. Variables are declared directly after IS/AS.
+
+Return ONLY the converted Oracle PL/SQL code without explanations."""
+
+            # DECLARE block needs special instruction
+            if chunk['type'] == 'DECLARE':
+                user_message = f"""This is the top-level variable declaration section of a stored procedure.
+In Oracle, variables are declared directly after CREATE PROCEDURE ... IS without the DECLARE keyword.
+
+Convert the following PostgreSQL variable declarations to Oracle, but do NOT include "declare" or "DECLARE" keyword.
+Return only the variable declarations.
+
+PostgreSQL Code:
+{chunk['text']}
+
+Oracle PL/SQL (variable declarations only, without DECLARE keyword):"""
+            else:
+                user_message = f"""Convert the following PostgreSQL PL/pgSQL code segment to Oracle PL/SQL.
 This is part {chunk_index} of {total_chunks} in a larger procedure.
 Block type: {chunk['type']}
 Description: {chunk['description']}
@@ -414,25 +480,50 @@ Oracle PL/SQL:"""
         result.append("-- ============================================================================")
         result.append("")
         
-        # SPEC 부분
+        # SPEC 부분 (CREATE PROCEDURE ... IS/AS 까지)
         spec_chunks = [c for c in converted_chunks if c['original_type'] == 'SPEC']
         if spec_chunks:
-            result.append(spec_chunks[0]['converted_text'])
+            spec_text = spec_chunks[0]['converted_text']
+            # AS $procedure$ 같은 PostgreSQL 구문 제거
+            spec_text = spec_text.replace('$procedure$', '').replace('AS $$', '')
+            # 마지막에 IS 또는 AS가 없으면 추가
+            spec_text = spec_text.strip()
+            if not spec_text.upper().endswith(' IS') and not spec_text.upper().endswith(' AS'):
+                spec_text += '\nIS'
+            result.append(spec_text)
             result.append("")
         
-        # DECLARE 부분
+        # DECLARE 부분 (Oracle은 DECLARE 키워드 없이 변수만 선언)
         declare_chunks = [c for c in converted_chunks if c['original_type'] == 'DECLARE']
         if declare_chunks:
-            result.append(declare_chunks[0]['converted_text'])
-            result.append("")
+            declare_text = declare_chunks[0]['converted_text']
+            original_text = declare_text
+            
+            # "DECLARE" 키워드 제거 (대소문자 무관) - 백업 안전장치
+            # LLM이 제대로 변환했다면 이미 DECLARE가 없어야 함
+            declare_text = re.sub(r'^\s*declare\s*$', '', declare_text, flags=re.IGNORECASE | re.MULTILINE)
+            declare_text = re.sub(r'^\s*DECLARE\s*$', '', declare_text, flags=re.MULTILINE)
+            declare_text = declare_text.strip()
+            
+            # DECLARE가 제거되었다면 경고 (LLM이 제대로 변환 안 한 것)
+            if original_text != declare_text and 'DECLARE' in original_text.upper():
+                print("[경고] DECLARE 키워드가 LLM 응답에 포함되어 있어서 제거했습니다.")
+                print("       LLM 프롬프트를 개선하거나 모델을 변경하는 것을 권장합니다.")
+            
+            if declare_text:
+                result.append(declare_text)
+                result.append("")
         
         # BEGIN 부분 및 기타
         begin_chunks = [c for c in converted_chunks if c['original_type'] not in ['SPEC', 'DECLARE']]
         if begin_chunks:
             for chunk in begin_chunks:
-                result.append(chunk['converted_text'])
-                result.append("")
+                chunk_text = chunk['converted_text'].strip()
+                if chunk_text:
+                    result.append(chunk_text)
+                    result.append("")
         
+        # 마지막에 END 프로시저명; 추가
         result.append("/")
         result.append("")
         
