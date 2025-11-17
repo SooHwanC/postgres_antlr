@@ -308,11 +308,6 @@ class PlpgsqlToOracleConverter:
             response = requests.post(LLM_URL, headers=headers, json=data, timeout=120)
             
             print(f"    [API] 응답 상태 코드: {response.status_code}")
-            print(f"    [API] 응답 헤더 Content-Type: {response.headers.get('Content-Type', 'N/A')}")
-            
-            # 응답 본문 미리보기
-            response_preview = response.text[:500] if response.text else '(empty)'
-            print(f"    [API] 응답 본문 미리보기: {response_preview}")
             
             # 응답 상태 확인
             if response.status_code != 200:
@@ -327,46 +322,8 @@ class PlpgsqlToOracleConverter:
                 print(f"    [API 오류] 응답 본문이 비어있습니다")
                 return f"-- API ERROR: Empty response\n-- Original PostgreSQL Code:\n{user_message}"
             
-            # Content-Type 확인하여 응답 형식 결정
-            content_type = response.headers.get('Content-Type', '').lower()
-            
-            # text/plain이면 JSON 파싱 없이 텍스트 그대로 반환
-            if 'text/plain' in content_type:
-                print(f"    [API] text/plain 응답 받음 ({len(response.text)} 문자)")
-                return response.text.strip()
-            
-            # JSON 응답인 경우 파싱
-            if 'application/json' in content_type or 'json' in content_type:
-                try:
-                    result = response.json()
-                except ValueError as json_error:
-                    print(f"    [API 오류] JSON 파싱 실패: {json_error}")
-                    print(f"    [API] 전체 응답 본문: {response.text[:1000]}")
-                    # JSON 파싱 실패했지만 텍스트로 응답이 있으면 그대로 사용
-                    if response.text.strip():
-                        print(f"    [API] JSON 파싱 실패했지만 텍스트 응답을 사용합니다")
-                        return response.text.strip()
-                    return f"-- JSON PARSE ERROR: {json_error}\n-- Response: {response.text[:500]}\n-- Original PostgreSQL Code:\n{user_message}"
-                
-                # 일반적인 OpenAI 호환 API 형식
-                if 'choices' in result and len(result['choices']) > 0:
-                    content = result['choices'][0]['message']['content']
-                    print(f"    [API] JSON 응답 받음 ({len(content)} 문자)")
-                    return content
-                # 직접 text 반환 형식
-                elif 'text' in result:
-                    print(f"    [API] JSON text 응답 받음 ({len(result['text'])} 문자)")
-                    return result['text']
-                # content 필드
-                elif 'content' in result:
-                    print(f"    [API] JSON content 응답 받음 ({len(result['content'])} 문자)")
-                    return result['content']
-                else:
-                    print(f"    [API 경고] 예상치 못한 JSON 형식: {list(result.keys())}")
-                    return str(result)
-            
-            # Content-Type을 알 수 없는 경우, 텍스트로 시도
-            print(f"    [API] 알 수 없는 Content-Type, 텍스트로 처리")
+            # API는 text 문자열로 직접 변환된 Oracle SQL을 반환
+            print(f"    [API] 응답 받음 ({len(response.text)} 문자)")
             return response.text.strip()
                 
         except requests.exceptions.Timeout:
