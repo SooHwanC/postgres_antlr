@@ -3,6 +3,26 @@ import requests
 import argparse
 from typing import Dict, List, Tuple
 from pathlib import Path
+import os
+
+
+# ==================== 설정 영역 (여기를 수정하세요) ====================
+API_URL = "https://your-company-api.com/chat"
+API_KEY = "your-api-key-here"
+MODEL = "gpt-4.1"
+
+# JSON과 SQL 파일이 있는 폴더 경로 (이 파일과 같은 폴더를 기본값으로)
+INPUT_FOLDER = r"C:\Users\sh\Desktop\test"
+
+# 오류 JSON 파일명
+ERRORS_JSON_FILE = "errors.json"
+
+# 수정할 SQL 파일명
+SQL_FILE = "procedure.sql"
+
+# 오류 라인 주변으로 포함할 라인 수
+CONTEXT_LINES = 50
+# ====================================================================
 
 
 class OracleProcedureFixer:
@@ -335,14 +355,14 @@ class OracleProcedureFixer:
         except Exception as e:
             print(f"파일 저장 실패: {e}")
     
-    def fix_procedure(self, errors_input: str, sql_file_path: str, output_path: str = None) -> bool:
+    def fix_procedure(self, errors_input: str, sql_file_path: str, output_folder: str = None) -> bool:
         """
         프로시저 오류 수정 메인 함수
         
         Args:
             errors_input: 오류 JSON (문자열 또는 파일 경로)
             sql_file_path: SQL 파일 경로
-            output_path: 출력 파일 경로 (없으면 자동 생성)
+            output_folder: 출력 폴더 경로 (없으면 입력 파일과 같은 폴더에 output 폴더 생성)
             
         Returns:
             성공 여부
@@ -408,9 +428,20 @@ class OracleProcedureFixer:
         
         # 5. 결과 저장
         print("\n[5/6] 수정된 파일 저장 중...")
-        if output_path is None:
-            original_path = Path(sql_file_path)
-            output_path = original_path.parent / f"{original_path.stem}_fixed{original_path.suffix}"
+        
+        # output 폴더 경로 생성
+        if output_folder is None:
+            input_path = Path(sql_file_path)
+            output_folder = input_path.parent / "output"
+        else:
+            output_folder = Path(output_folder)
+        
+        # output 폴더 생성
+        output_folder.mkdir(exist_ok=True)
+        
+        # 출력 파일 경로
+        original_filename = Path(sql_file_path).name
+        output_path = output_folder / original_filename
         
         self.save_sql(current_lines, str(output_path))
         
@@ -426,47 +457,104 @@ class OracleProcedureFixer:
 def main():
     """
     메인 실행 함수
+    
+    사용법 1: 상단 설정 사용 (파일을 직접 실행)
+        python oracle_fixer.py
+    
+    사용법 2: 명령줄 인자 사용 (개별 파라미터 지정)
+        python oracle_fixer.py -e errors.json -s procedure.sql -u API_URL -k API_KEY
     """
     parser = argparse.ArgumentParser(
         description="오라클 프로시저 컴파일 오류 자동 수정 도구",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-사용 예시:
-  python oracle_fixer.py -e errors.json -s procedure.sql -u https://api.example.com/chat -k YOUR_API_KEY
-  python oracle_fixer.py -e errors.json -s procedure.sql -u https://api.example.com/chat -k YOUR_API_KEY -o fixed.sql -c 30
+사용 방법:
+
+1. 상단 설정값을 수정하고 실행:
+   python oracle_fixer.py
+
+2. 명령줄 인자로 실행:
+   python oracle_fixer.py -e errors.json -s procedure.sql -u API_URL -k API_KEY
         """
     )
     
-    parser.add_argument('-e', '--errors', required=True,
-                        help='컴파일 오류 JSON 파일 경로')
-    parser.add_argument('-s', '--sql', required=True,
-                        help='수정할 SQL 파일 경로')
-    parser.add_argument('-u', '--url', required=True,
+    parser.add_argument('-e', '--errors',
+                        help='컴파일 오류 JSON 파일명 (또는 경로)')
+    parser.add_argument('-s', '--sql',
+                        help='수정할 SQL 파일명 (또는 경로)')
+    parser.add_argument('-u', '--url',
                         help='LLM API URL')
-    parser.add_argument('-k', '--key', required=True,
+    parser.add_argument('-k', '--key',
                         help='LLM API 인증 키')
-    parser.add_argument('-m', '--model', default='gpt-4.1',
-                        help='사용할 LLM 모델 (기본값: gpt-4.1)')
-    parser.add_argument('-o', '--output', default=None,
-                        help='출력 파일 경로 (기본값: 원본파일명_fixed.sql)')
-    parser.add_argument('-c', '--context', type=int, default=50,
-                        help='오류 라인 주변으로 포함할 라인 수 (기본값: 50)')
+    parser.add_argument('-f', '--folder',
+                        help='JSON과 SQL이 있는 폴더 경로')
+    parser.add_argument('-m', '--model',
+                        help='사용할 LLM 모델')
+    parser.add_argument('-o', '--output',
+                        help='출력 폴더 경로')
+    parser.add_argument('-c', '--context', type=int,
+                        help='오류 라인 주변으로 포함할 라인 수')
     
     args = parser.parse_args()
     
+    # 명령줄 인자가 있으면 우선, 없으면 상단 설정 사용
+    api_url = args.url if args.url else API_URL
+    api_key = args.key if args.key else API_KEY
+    model = args.model if args.model else MODEL
+    context_lines = args.context if args.context else CONTEXT_LINES
+    
+    input_folder = args.folder if args.folder else INPUT_FOLDER
+    input_folder = Path(input_folder)
+    
+    errors_file = args.errors if args.errors else ERRORS_JSON_FILE
+    sql_file = args.sql if args.sql else SQL_FILE
+    
+    # 파일 경로 구성 (상대 경로면 input_folder 기준, 절대 경로면 그대로)
+    errors_path = Path(errors_file)
+    if not errors_path.is_absolute():
+        errors_path = input_folder / errors_file
+    
+    sql_path = Path(sql_file)
+    if not sql_path.is_absolute():
+        sql_path = input_folder / sql_file
+    
+    output_folder = args.output if args.output else None
+    
+    # 설정 정보 출력
+    print("\n" + "=" * 70)
+    print("설정 정보")
+    print("=" * 70)
+    print(f"API URL: {api_url}")
+    print(f"Model: {model}")
+    print(f"Input Folder: {input_folder}")
+    print(f"Errors File: {errors_path}")
+    print(f"SQL File: {sql_path}")
+    print(f"Output Folder: {output_folder if output_folder else str(input_folder / 'output')}")
+    print(f"Context Lines: {context_lines}")
+    print("=" * 70)
+    
+    # 파일 존재 확인
+    if not errors_path.exists():
+        print(f"\n오류: JSON 파일을 찾을 수 없습니다: {errors_path}")
+        exit(1)
+    
+    if not sql_path.exists():
+        print(f"\n오류: SQL 파일을 찾을 수 없습니다: {sql_path}")
+        exit(1)
+    
     # Fixer 객체 생성
     fixer = OracleProcedureFixer(
-        api_url=args.url,
-        api_key=args.key,
-        model=args.model,
-        context_lines=args.context
+        api_url=api_url,
+        api_key=api_key,
+        model=model,
+        context_lines=context_lines
     )
     
     # 프로시저 수정 실행
     success = fixer.fix_procedure(
-        errors_input=args.errors,
-        sql_file_path=args.sql,
-        output_path=args.output
+        errors_input=str(errors_path),
+        sql_file_path=str(sql_path),
+        output_folder=output_folder
     )
     
     if not success:
