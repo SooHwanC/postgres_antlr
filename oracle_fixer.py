@@ -165,6 +165,10 @@ class PlpgsqlToOracleConverter:
         
         if not children:
             # 자식이 없으면 전체를 하나의 청크로
+            total_lines = begin_node['endLine'] - begin_node['startLine'] + 1
+            if total_lines > MAX_LINES_PER_CHUNK:
+                # 너무 크면 강제 분할
+                return self.split_large_block('BEGIN', begin_node['startLine'], begin_node['endLine'])
             return [{
                 'type': 'BEGIN',
                 'startLine': begin_node['startLine'],
@@ -180,30 +184,61 @@ class PlpgsqlToOracleConverter:
         for i, child in enumerate(children):
             child_lines = child['endLine'] - child['startLine'] + 1
             
-            # IF, LOOP, WHILE 등 큰 제어문은 독립적으로 처리
-            if child.get('type') in ['IF', 'LOOP', 'WHILE', 'FOR', 'CASE'] and child_lines > MAX_LINES_PER_CHUNK / 2:
+            print(f"    [디버그] Child {i+1}/{len(children)}: type={child.get('type')}, lines={child['startLine']}-{child['endLine']} ({child_lines} 라인)")
+            
+            # 큰 블록은 무조건 독립 처리 (50라인 이상)
+            if child_lines > 50:
+                print(f"    [디버그] 큰 블록 독립 처리: {child_lines} 라인")
                 # 현재 그룹이 있으면 먼저 처리
                 if current_group:
-                    chunks.append(self.create_group_chunk(current_group, 'STATEMENTS'))
+                    group_chunk = self.create_group_chunk(current_group, 'STATEMENTS')
+                    if group_chunk:
+                        group_lines = group_chunk['endLine'] - group_chunk['startLine'] + 1
+                        if group_lines > MAX_LINES_PER_CHUNK:
+                            print(f"[경고] 그룹이 너무 큽니다 ({group_lines} 라인). 강제 분할합니다.")
+                            chunks.extend(self.split_large_block('STATEMENTS', group_chunk['startLine'], group_chunk['endLine']))
+                        else:
+                            chunks.append(group_chunk)
                     current_group = []
                     current_lines = 0
                 
-                # 큰 제어문 추가 (재귀적으로 분할)
-                chunks.extend(self.split_into_chunks(child, 1))
+                # 큰 블록 처리 (재귀적으로 분할하거나 강제 분할)
+                if child_lines > MAX_LINES_PER_CHUNK:
+                    print(f"    [디버그] {child_lines} 라인 블록을 재귀 분할합니다")
+                    chunks.extend(self.split_into_chunks(child, 1))
+                else:
+                    # 50~200라인 사이는 독립 청크로
+                    chunks.append({
+                        'type': child.get('type', 'BLOCK'),
+                        'startLine': child['startLine'],
+                        'endLine': child['endLine'],
+                        'text': self.get_sql_text(child['startLine'], child['endLine']),
+                        'description': f"{child.get('type', 'BLOCK')} block ({child_lines} lines)"
+                    })
             else:
-                # 그룹에 추가
+                # 작은 블록은 그룹에 추가
                 current_group.append(child)
                 current_lines += child_lines
                 
-                # 그룹이 너무 크면 청크로 만들기
+                # 그룹이 MAX_LINES_PER_CHUNK를 넘으면 청크로 만들기
                 if current_lines >= MAX_LINES_PER_CHUNK:
-                    chunks.append(self.create_group_chunk(current_group, 'STATEMENTS'))
+                    print(f"    [디버그] 그룹이 {current_lines} 라인 도달, 청크 생성")
+                    group_chunk = self.create_group_chunk(current_group, 'STATEMENTS')
+                    if group_chunk:
+                        chunks.append(group_chunk)
                     current_group = []
                     current_lines = 0
         
         # 남은 그룹 처리
         if current_group:
-            chunks.append(self.create_group_chunk(current_group, 'STATEMENTS'))
+            group_chunk = self.create_group_chunk(current_group, 'STATEMENTS')
+            if group_chunk:
+                group_lines = group_chunk['endLine'] - group_chunk['startLine'] + 1
+                if group_lines > MAX_LINES_PER_CHUNK:
+                    print(f"[경고] 마지막 그룹이 너무 큽니다 ({group_lines} 라인). 강제 분할합니다.")
+                    chunks.extend(self.split_large_block('STATEMENTS', group_chunk['startLine'], group_chunk['endLine']))
+                else:
+                    chunks.append(group_chunk)
         
         return chunks
     
@@ -214,7 +249,12 @@ class PlpgsqlToOracleConverter:
         
         start_line = min(n['startLine'] for n in nodes)
         end_line = max(n['endLine'] for n in nodes)
+        line_count = end_line - start_line + 1
         types = [n.get('type', 'UNKNOWN') for n in nodes]
+        
+        # 그룹이 너무 크면 경고
+        if line_count > MAX_LINES_PER_CHUNK * 2:
+            print(f"[경고] 큰 그룹 생성: {line_count} 라인 (노드 {len(nodes)}개)")
         
         return {
             'type': chunk_type,
@@ -261,16 +301,33 @@ class PlpgsqlToOracleConverter:
             print(f"    [API] 요청 전송 중... (메시지 길이: {len(user_message)} 문자)")
             response = requests.post(LLM_URL, headers=headers, json=data, timeout=120)
             
+            print(f"    [API] 응답 상태 코드: {response.status_code}")
+            print(f"    [API] 응답 헤더 Content-Type: {response.headers.get('Content-Type', 'N/A')}")
+            
+            # 응답 본문 미리보기
+            response_preview = response.text[:500] if response.text else '(empty)'
+            print(f"    [API] 응답 본문 미리보기: {response_preview}")
+            
             # 응답 상태 확인
             if response.status_code != 200:
-                error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+                error_msg = f"HTTP {response.status_code}: {response.text[:500]}"
                 print(f"    [API 오류] {error_msg}")
                 return f"-- API ERROR: {error_msg}\n-- Original PostgreSQL Code:\n{user_message}"
             
             response.raise_for_status()
             
+            # 응답이 비어있는지 확인
+            if not response.text:
+                print(f"    [API 오류] 응답 본문이 비어있습니다")
+                return f"-- API ERROR: Empty response\n-- Original PostgreSQL Code:\n{user_message}"
+            
             # 응답에서 text 추출
-            result = response.json()
+            try:
+                result = response.json()
+            except ValueError as json_error:
+                print(f"    [API 오류] JSON 파싱 실패: {json_error}")
+                print(f"    [API] 전체 응답 본문: {response.text[:1000]}")
+                return f"-- JSON PARSE ERROR: {json_error}\n-- Response: {response.text[:500]}\n-- Original PostgreSQL Code:\n{user_message}"
             
             # 일반적인 OpenAI 호환 API 형식
             if 'choices' in result and len(result['choices']) > 0:
