@@ -86,118 +86,16 @@ class OracleProcedureFixer:
             print(f"SQL 파일 읽기 실패: {e}")
             return []
     
-    def analyze_errors_with_llm(self, errors: List[Dict], total_lines: int) -> List[Dict]:
+    def group_errors_by_proximity(self, errors: List[Dict], proximity: int = 100) -> List[List[Dict]]:
         """
-        LLM에게 오류를 분석시켜 그룹화 및 수정 범위 결정
+        가까운 라인의 오류들을 그룹화
         
         Args:
             errors: 오류 리스트
-            total_lines: SQL 파일의 전체 라인 수
+            proximity: 그룹화할 라인 간격
             
         Returns:
-            그룹 정보 리스트 [{"errors": [오류들], "start_line": 시작, "end_line": 끝}, ...]
-        """
-        # 오류 정보 요약
-        error_summary = []
-        for idx, error in enumerate(errors, 1):
-            line = error.get('LINE', 'N/A')
-            position = error.get('POSITION', 'N/A')
-            text = error.get('TEXT', '')
-            error_summary.append({
-                "index": idx,
-                "line": line,
-                "position": position,
-                "error_text": text
-            })
-        
-        prompt = f"""당신은 오라클 PL/SQL 전문가입니다.
-아래의 컴파일 오류들을 분석하여 효율적으로 수정할 수 있도록 그룹화하고 각 그룹별로 필요한 코드 범위를 결정해주세요.
-
-## 프로시저 정보:
-- 전체 라인 수: {total_lines}
-
-## 컴파일 오류 목록:
-```json
-{json.dumps(error_summary, ensure_ascii=False, indent=2)}
-```
-
-## 요청사항:
-1. 관련된 오류들을 그룹으로 묶어주세요.
-   - "SQL Statement ignored" 오류는 보통 이전 오류의 결과이므로 함께 묶어야 합니다.
-   - JOIN 관련 오류들은 함께 처리해야 할 수 있습니다.
-   - 같은 구문 블록의 오류들은 함께 묶어야 합니다.
-
-2. 각 그룹마다 수정에 필요한 코드 범위(시작 라인~끝 라인)를 지정해주세요.
-   - 오류 라인만이 아니라 문맥 이해를 위한 앞뒤 코드도 포함하세요.
-   - 하지만 너무 넓은 범위는 피하세요 (최대 200라인 정도).
-
-3. 아래 JSON 형식으로만 응답해주세요:
-
-```json
-[
-  {{
-    "group_id": 1,
-    "error_indices": [1, 2],
-    "start_line": 500,
-    "end_line": 600,
-    "reason": "이 오류들을 함께 처리하는 이유"
-  }},
-  {{
-    "group_id": 2,
-    "error_indices": [3, 4, 5],
-    "start_line": 850,
-    "end_line": 950,
-    "reason": "이 오류들을 함께 처리하는 이유"
-  }}
-]
-```
-
-중요: JSON 형식만 응답하고 다른 설명은 추가하지 마세요."""
-
-        try:
-            response = self.call_llm(prompt)
-            
-            # JSON 추출 시도
-            # ```json ... ``` 형태로 올 수 있으므로 처리
-            json_start = response.find('[')
-            json_end = response.rfind(']') + 1
-            
-            if json_start != -1 and json_end > json_start:
-                json_str = response[json_start:json_end]
-                groups_info = json.loads(json_str)
-                
-                # 그룹 정보를 실제 오류 객체와 매핑
-                result = []
-                for group_info in groups_info:
-                    error_indices = group_info.get('error_indices', [])
-                    group_errors = [errors[idx - 1] for idx in error_indices if 0 < idx <= len(errors)]
-                    
-                    if group_errors:
-                        result.append({
-                            'errors': group_errors,
-                            'start_line': group_info.get('start_line'),
-                            'end_line': group_info.get('end_line'),
-                            'reason': group_info.get('reason', '')
-                        })
-                
-                return result
-            else:
-                print("   ⚠ LLM 응답에서 JSON을 찾을 수 없습니다. 기본 그룹화를 사용합니다.")
-                return self._fallback_grouping(errors)
-                
-        except Exception as e:
-            print(f"   ⚠ 오류 분석 중 문제 발생: {e}. 기본 그룹화를 사용합니다.")
-            return self._fallback_grouping(errors)
-    
-    def _fallback_grouping(self, errors: List[Dict]) -> List[Dict]:
-        """
-        LLM 분석 실패 시 폴백: 단순 근접성 기반 그룹화
-        
-        Args:
-            errors: 오류 리스트
-            
-        Returns:
-            그룹 정보 리스트
+            그룹화된 오류 리스트
         """
         if not errors:
             return []
@@ -207,50 +105,43 @@ class OracleProcedureFixer:
         
         groups = []
         current_group = [sorted_errors[0]]
-        proximity = 100
         
         for error in sorted_errors[1:]:
+            # 현재 그룹의 마지막 오류와 비교
             last_line = current_group[-1].get('LINE', 0)
             current_line = error.get('LINE', 0)
             
             if current_line - last_line <= proximity:
+                # 같은 그룹에 추가
                 current_group.append(error)
             else:
+                # 새 그룹 시작
                 groups.append(current_group)
                 current_group = [error]
         
+        # 마지막 그룹 추가
         groups.append(current_group)
         
-        # 그룹 정보 형식으로 변환
-        result = []
-        for group in groups:
-            min_line = min(err.get('LINE', 1) for err in group)
-            max_line = max(err.get('LINE', 1) for err in group)
-            
-            result.append({
-                'errors': group,
-                'start_line': max(1, min_line - self.context_lines),
-                'end_line': max_line + self.context_lines,
-                'reason': '근접성 기반 자동 그룹화'
-            })
-        
-        return result
+        return groups
     
-    def extract_context(self, sql_lines: List[str], start_line: int, end_line: int) -> Tuple[str, int, int]:
+    def extract_context(self, sql_lines: List[str], error_group: List[Dict]) -> Tuple[str, int, int]:
         """
-        지정된 범위의 코드 추출
+        오류 그룹에 대한 컨텍스트 추출
         
         Args:
             sql_lines: SQL 파일의 모든 라인
-            start_line: 시작 라인 (1-based)
-            end_line: 끝 라인 (1-based)
+            error_group: 오류 그룹
             
         Returns:
             (컨텍스트 코드, 시작 라인, 끝 라인) 튜플
         """
-        # 범위 유효성 검사
-        start_line = max(1, start_line)
-        end_line = min(len(sql_lines), end_line)
+        # 그룹 내 최소/최대 라인 번호 찾기
+        min_line = min(err.get('LINE', 1) for err in error_group)
+        max_line = max(err.get('LINE', 1) for err in error_group)
+        
+        # 컨텍스트 범위 계산 (1-based index)
+        start_line = max(1, min_line - self.context_lines)
+        end_line = min(len(sql_lines), max_line + self.context_lines)
         
         # 컨텍스트 추출 (0-based index로 변환)
         context_lines = sql_lines[start_line - 1:end_line]
@@ -297,7 +188,7 @@ class OracleProcedureFixer:
         error_summary = self.build_error_summary(error_group, start_line)
         
         prompt = f"""당신은 오라클 데이터베이스와 PL/SQL 전문가입니다.
-아래의 오라클 프로시저 일부에서 컴파일 오류가 발생했습니다. 오류 메시지를 정확히 분석하고 수정해주세요.
+아래의 오라클 프로시저 일부에서 컴파일 오류가 발생했습니다. 오류만 정확히 수정해주세요.
 
 ## 컨텍스트 정보:
 - 전체 프로시저 중 Line {start_line} ~ Line {end_line} 부분입니다.
@@ -311,32 +202,38 @@ class OracleProcedureFixer:
 {context}
 ```
 
-## 요청사항:
-1. 각 오류 메시지(ORA-XXXXX 등)를 정확히 분석하여 원인을 파악하세요.
-2. 오류가 발생한 부분만 최소한으로 수정하세요.
-3. 수정된 코드 전체를 제공하세요 (위에 제공된 Line {start_line} ~ Line {end_line} 전체).
-4. 주요 수정 사항에 대한 간단한 설명을 제공하세요.
+## 절대적으로 지켜야 할 규칙:
+1. 오류 메시지에서 지적한 문제만 수정하세요.
+2. 원본 코드를 최대한 그대로 유지하세요.
+3. 절대로 주석을 추가하지 마세요 (/* TODO */, /* 수정 필요 */ 등 금지).
+4. 절대로 설명 텍스트를 추가하지 마세요.
+5. 추측으로 코드를 변경하지 마세요.
+6. 컬럼명, 테이블명, 변수명 등 확실하지 않은 것은 원본 그대로 두세요.
+7. 수정된 코드는 즉시 실행 가능해야 합니다.
+8. 원본과 동일한 로직을 유지해야 합니다.
 
 ## 출력 형식:
-먼저 수정 사항을 간단히 설명하고, 그 다음 "=== 수정된 코드 시작 ===" 이라고 쓴 후
+"=== 수정된 코드 시작 ===" 이라고 쓴 후
 수정된 전체 코드를 제공하고, "=== 수정된 코드 끝 ===" 으로 마무리하세요.
 
-## 중요 원칙:
-- 제공된 코드 범위(Line {start_line} ~ {end_line}) 전체를 수정하여 반환해야 합니다.
-- 오류 메시지에서 지적한 정확한 위치의 문제만 수정하세요.
-- 오류와 무관한 코드는 절대 변경하지 마세요.
-- 코드 구조나 로직을 임의로 변경하지 마세요.
-- 오라클 PL/SQL 표준 문법을 준수하세요.
+설명이나 사족은 절대 넣지 마세요. 코드만 제공하세요.
 
-## 오류 분석 가이드:
-- ORA-00900번대: SQL 구문 오류 (문법, 키워드, 명령어 문제)
-- ORA-00600번대: 내부 오류
-- ORA-01000번대: 커서, 바인드 변수 관련
-- ORA-06500번대: PL/SQL 런타임 오류
-- PLS-00000번대: PL/SQL 컴파일 오류
-- 위 외의 모든 오라클 오류 코드: 오류 메시지 텍스트를 정확히 읽고 분석하여 해결
+## 수정 예시:
+잘못된 수정 (절대 금지):
+```sql
+SELECT 
+  /* 이 부분은 실제 컬럼에 맞게 작성 필요 */
+FROM table_name
+```
 
-각 오류 메시지의 의미를 정확히 파악하고, 해당 라인의 코드를 검토하여 문제를 해결하세요.
+올바른 수정:
+```sql
+SELECT 
+  column1, column2  -- 원본에 있던 컬럼 유지
+FROM table_name
+```
+
+반드시 원본 코드의 모든 컬럼, 테이블, 변수를 그대로 유지하면서 오류만 수정하세요.
 """
         return prompt
     
@@ -497,31 +394,20 @@ class OracleProcedureFixer:
         total_chars = sum(len(line) for line in sql_lines)
         print(f"   ✓ {len(sql_lines)}라인, 총 {total_chars:,}자의 SQL 코드를 읽었습니다.")
         
-        # 3. LLM으로 오류 분석 및 그룹화
-        print("\n[3/6] LLM을 통한 오류 분석 및 그룹화 중...")
-        error_groups = self.analyze_errors_with_llm(errors, len(sql_lines))
+        # 3. 오류 그룹화
+        print("\n[3/6] 오류 그룹화 중...")
+        error_groups = self.group_errors_by_proximity(errors)
         print(f"   ✓ {len(error_groups)}개의 오류 그룹으로 분류했습니다.")
-        
-        # 그룹 정보 출력
-        for idx, group in enumerate(error_groups, 1):
-            reason = group.get('reason', '')
-            print(f"      그룹 {idx}: {len(group['errors'])}개 오류, Line {group['start_line']}~{group['end_line']}")
-            if reason:
-                print(f"               이유: {reason}")
         
         # 4. 각 그룹별로 수정
         print("\n[4/6] 오류 수정 중...")
         current_lines = sql_lines.copy()
         
-        for idx, group_info in enumerate(error_groups, 1):
+        for idx, error_group in enumerate(error_groups, 1):
             print(f"\n   [{idx}/{len(error_groups)}] 그룹 처리 중...")
             
-            error_group = group_info['errors']
-            start_line = group_info['start_line']
-            end_line = group_info['end_line']
-            
             # 컨텍스트 추출
-            context, start_line, end_line = self.extract_context(current_lines, start_line, end_line)
+            context, start_line, end_line = self.extract_context(current_lines, error_group)
             print(f"      - Line {start_line}~{end_line} ({end_line - start_line + 1}라인, {len(context):,}자)")
             print(f"      - {len(error_group)}개 오류 포함")
             
