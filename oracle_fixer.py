@@ -32,6 +32,12 @@ LLM_MODEL = "gpt-4.1"
 # 블록당 최대 라인 수 (이 값을 조정하여 LLM 요청 크기 조절)
 MAX_LINES_PER_CHUNK = 200
 
+# LLM 요청당 최대 문자 수 (이 값을 초과하면 청크를 더 작게 나눔)
+MAX_CHARS_PER_REQUEST = 50000
+
+# API 요청 실패 시 재시도 횟수
+MAX_RETRIES = 2
+
 # ============================================================================
 # 메인 로직
 # ============================================================================
@@ -282,8 +288,8 @@ class PlpgsqlToOracleConverter:
         
         return chunks
     
-    def call_llm(self, system_message: str, user_message: str) -> str:
-        """LLM API 호출"""
+    def call_llm(self, system_message: str, user_message: str, retry_count: int = 0) -> str:
+        """LLM API 호출 (재시도 지원)"""
         headers = {
             'Authorization': f'Bearer {LLM_API_KEY}',
             'Content-Type': 'application/json'
@@ -321,30 +327,47 @@ class PlpgsqlToOracleConverter:
                 print(f"    [API 오류] 응답 본문이 비어있습니다")
                 return f"-- API ERROR: Empty response\n-- Original PostgreSQL Code:\n{user_message}"
             
-            # 응답에서 text 추출
-            try:
-                result = response.json()
-            except ValueError as json_error:
-                print(f"    [API 오류] JSON 파싱 실패: {json_error}")
-                print(f"    [API] 전체 응답 본문: {response.text[:1000]}")
-                return f"-- JSON PARSE ERROR: {json_error}\n-- Response: {response.text[:500]}\n-- Original PostgreSQL Code:\n{user_message}"
+            # Content-Type 확인하여 응답 형식 결정
+            content_type = response.headers.get('Content-Type', '').lower()
             
-            # 일반적인 OpenAI 호환 API 형식
-            if 'choices' in result and len(result['choices']) > 0:
-                content = result['choices'][0]['message']['content']
-                print(f"    [API] 응답 받음 ({len(content)} 문자)")
-                return content
-            # 직접 text 반환 형식
-            elif 'text' in result:
-                print(f"    [API] 응답 받음 ({len(result['text'])} 문자)")
-                return result['text']
-            # content 필드
-            elif 'content' in result:
-                print(f"    [API] 응답 받음 ({len(result['content'])} 문자)")
-                return result['content']
-            else:
-                print(f"    [API 경고] 예상치 못한 응답 형식: {list(result.keys())}")
-                return str(result)
+            # text/plain이면 JSON 파싱 없이 텍스트 그대로 반환
+            if 'text/plain' in content_type:
+                print(f"    [API] text/plain 응답 받음 ({len(response.text)} 문자)")
+                return response.text.strip()
+            
+            # JSON 응답인 경우 파싱
+            if 'application/json' in content_type or 'json' in content_type:
+                try:
+                    result = response.json()
+                except ValueError as json_error:
+                    print(f"    [API 오류] JSON 파싱 실패: {json_error}")
+                    print(f"    [API] 전체 응답 본문: {response.text[:1000]}")
+                    # JSON 파싱 실패했지만 텍스트로 응답이 있으면 그대로 사용
+                    if response.text.strip():
+                        print(f"    [API] JSON 파싱 실패했지만 텍스트 응답을 사용합니다")
+                        return response.text.strip()
+                    return f"-- JSON PARSE ERROR: {json_error}\n-- Response: {response.text[:500]}\n-- Original PostgreSQL Code:\n{user_message}"
+                
+                # 일반적인 OpenAI 호환 API 형식
+                if 'choices' in result and len(result['choices']) > 0:
+                    content = result['choices'][0]['message']['content']
+                    print(f"    [API] JSON 응답 받음 ({len(content)} 문자)")
+                    return content
+                # 직접 text 반환 형식
+                elif 'text' in result:
+                    print(f"    [API] JSON text 응답 받음 ({len(result['text'])} 문자)")
+                    return result['text']
+                # content 필드
+                elif 'content' in result:
+                    print(f"    [API] JSON content 응답 받음 ({len(result['content'])} 문자)")
+                    return result['content']
+                else:
+                    print(f"    [API 경고] 예상치 못한 JSON 형식: {list(result.keys())}")
+                    return str(result)
+            
+            # Content-Type을 알 수 없는 경우, 텍스트로 시도
+            print(f"    [API] 알 수 없는 Content-Type, 텍스트로 처리")
+            return response.text.strip()
                 
         except requests.exceptions.Timeout:
             print(f"    [API 오류] 타임아웃 (120초 초과)")
@@ -363,20 +386,20 @@ class PlpgsqlToOracleConverter:
         print(f"  [{chunk_index}/{total_chunks}] 변환 중: {chunk['description']} (lines {chunk['startLine']}-{chunk['endLine']})")
         
         system_message = """You are an expert database developer specializing in converting PostgreSQL PL/pgSQL to Oracle PL/SQL.
-
-Key conversion rules:
-1. Change PROCEDURE syntax from PostgreSQL to Oracle format
-2. Convert data types: varchar → VARCHAR2, datetime → DATE or TIMESTAMP, etc.
-3. Convert control structures: IF/LOOP/WHILE/FOR to Oracle syntax
-4. Change function calls: EXTRACT() → appropriate Oracle functions, NOW() → SYSDATE, etc.
-5. Convert temporary tables to Oracle global temporary tables or collections
-6. Change RAISE INFO to DBMS_OUTPUT.PUT_LINE
-7. Convert cursors and refcursors to Oracle syntax
-8. Convert string operations: || concatenation, SUBSTRING, etc.
-9. Handle exception blocks properly
-10. Remove PostgreSQL-specific features like $procedure$ and replace with proper Oracle delimiters
-
-Return ONLY the converted Oracle PL/SQL code without explanations."""
+ 
+ Key conversion rules:
+ 1. Change PROCEDURE syntax from PostgreSQL to Oracle format
+ 2. Convert data types: varchar → VARCHAR2, datetime → DATE or TIMESTAMP, etc.
+ 3. Convert control structures: IF/LOOP/WHILE/FOR to Oracle syntax
+ 4. Change function calls: EXTRACT() → appropriate Oracle functions, NOW() → SYSDATE, etc.
+ 5. Convert temporary tables to Oracle global temporary tables or collections
+ 6. Change RAISE INFO to DBMS_OUTPUT.PUT_LINE
+ 7. Convert cursors and refcursors to Oracle syntax
+ 8. Convert string operations: || concatenation, SUBSTRING, etc.
+ 9. Handle exception blocks properly
+ 10. Remove PostgreSQL-specific features like $procedure$ and replace with proper Oracle delimiters
+ 
+ Return ONLY the converted Oracle PL/SQL code without explanations."""
 
         user_message = f"""Convert the following PostgreSQL PL/pgSQL code segment to Oracle PL/SQL.
 This is part {chunk_index} of {total_chunks} in a larger procedure.
@@ -387,6 +410,39 @@ PostgreSQL Code:
 {chunk['text']}
 
 Oracle PL/SQL:"""
+
+        # 요청 크기가 너무 크면 청크를 더 작게 나눔
+        total_message_size = len(system_message) + len(user_message)
+        if total_message_size > MAX_CHARS_PER_REQUEST:
+            print(f"    [경고] 요청이 너무 큽니다 ({total_message_size:,} 문자 > {MAX_CHARS_PER_REQUEST:,})")
+            print(f"    [경고] 청크를 더 작게 나누어 처리합니다...")
+            
+            # 라인 수로 반으로 나누기
+            mid_line = (chunk['startLine'] + chunk['endLine']) // 2
+            
+            # 첫 번째 절반
+            chunk1 = {
+                'type': chunk['type'] + '_PART1',
+                'startLine': chunk['startLine'],
+                'endLine': mid_line,
+                'text': self.get_sql_text(chunk['startLine'], mid_line),
+                'description': chunk['description'] + ' (Part 1/2)'
+            }
+            
+            # 두 번째 절반
+            chunk2 = {
+                'type': chunk['type'] + '_PART2',
+                'startLine': mid_line + 1,
+                'endLine': chunk['endLine'],
+                'text': self.get_sql_text(mid_line + 1, chunk['endLine']),
+                'description': chunk['description'] + ' (Part 2/2)'
+            }
+            
+            # 재귀적으로 각 절반 변환
+            result1 = self.convert_chunk(chunk1, chunk_index, total_chunks)
+            result2 = self.convert_chunk(chunk2, chunk_index, total_chunks)
+            
+            return f"{result1}\n\n-- Part 2 continues...\n{result2}"
 
         return self.call_llm(system_message, user_message)
     
