@@ -1,254 +1,76 @@
+"""
+PostgreSQL → Oracle 프로시저 변환 프로그램
+
+사용 전 필수 설치:
+    pip install requests
+
+사용법:
+1. 아래 설정 부분을 수정하세요
+2. SQL과 JSON 파일을 INPUT_FOLDER에 넣으세요  
+3. python postgres_oracle_converter.py 실행
+"""
+
 import json
 import requests
-import argparse
-from typing import Dict, List, Tuple
-from pathlib import Path
+import time
 import os
+import sys
+from typing import List, Dict, Any
+from dataclasses import dataclass
+import logging
 
+# ==================== 여기서 설정을 수정하세요 ====================
 
-# ==================== 설정 영역 (여기를 수정하세요) ====================
-API_URL = "https://your-company-api.com/chat"
+# LLM API 설정
+API_URL = "https://your-company-api.com/v1/chat/completions"
 API_KEY = "your-api-key-here"
 MODEL = "gpt-4.1"
 
-# JSON과 SQL 파일이 있는 폴더 경로 (이 파일과 같은 폴더를 기본값으로)
-INPUT_FOLDER = r"C:\Users\sh\Desktop\test"
+# 입력 폴더 경로 (SQL과 JSON 파일이 있는 폴더)
+INPUT_FOLDER = r"C:\Users\test\input"
 
-# 오류 JSON 파일명
-ERRORS_JSON_FILE = "errors.json"
+# SQL 파일 이름 (INPUT_FOLDER 안에 있어야 함)
+SQL_FILE_NAME = "input.sql"
 
-# 수정할 SQL 파일명
-SQL_FILE = "procedure.sql"
+# JSON 파일 이름 (INPUT_FOLDER 안에 있어야 함)
+JSON_FILE_NAME = "structure.json"
 
-# 오류 라인 주변으로 포함할 라인 수
-CONTEXT_LINES = 50
-# ====================================================================
+# 고급 설정
+MAX_TOKENS_PER_CHUNK = 4000  # 청크당 최대 토큰 수
+RETRY_COUNT = 3              # API 실패시 재시도 횟수
+RETRY_DELAY = 2              # 재시도 간격(초)
+
+# ==============================================================
+
+# 로깅 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
-class OracleProcedureFixer:
-    def __init__(self, api_url: str, api_key: str, model: str = "gpt-4.1", context_lines: int = 50):
-        """
-        오라클 프로시저 오류 수정기 초기화
-        
-        Args:
-            api_url: LLM API URL
-            api_key: API 인증 키
-            model: 사용할 모델명
-            context_lines: 오류 라인 주변으로 포함할 라인 수
-        """
-        self.api_url = api_url
-        self.api_key = api_key
-        self.model = model
-        self.context_lines = context_lines
+@dataclass
+class ConversionConfig:
+    """변환 설정"""
+    api_url: str
+    api_key: str
+    model: str = "gpt-4.1"
+    max_tokens_per_chunk: int = 4000
+    retry_count: int = 3
+    retry_delay: int = 2
+
+
+class LLMClient:
+    """LLM API 클라이언트"""
     
-    def parse_errors(self, errors_json: str) -> List[Dict]:
-        """
-        JSON 형태의 오류를 파싱
+    def __init__(self, config: ConversionConfig):
+        self.config = config
         
-        Args:
-            errors_json: JSON 문자열 또는 파일 경로
-            
-        Returns:
-            오류 리스트
-        """
-        try:
-            # JSON 파일인 경우
-            if Path(errors_json).exists():
-                with open(errors_json, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-            else:
-                # JSON 문자열인 경우
-                data = json.loads(errors_json)
-            
-            # 첫 번째 쿼리의 결과를 가져옴
-            first_key = list(data.keys())[0]
-            errors = data[first_key]
-            
-            return errors
-        except Exception as e:
-            print(f"오류 파싱 실패: {e}")
-            return []
-    
-    def read_sql_file(self, sql_file_path: str) -> List[str]:
-        """
-        SQL 파일을 라인별로 읽기
-        
-        Args:
-            sql_file_path: SQL 파일 경로
-            
-        Returns:
-            SQL 파일 라인 리스트
-        """
-        try:
-            with open(sql_file_path, 'r', encoding='utf-8') as f:
-                return f.readlines()
-        except Exception as e:
-            print(f"SQL 파일 읽기 실패: {e}")
-            return []
-    
-    def group_errors_by_proximity(self, errors: List[Dict], proximity: int = 100) -> List[List[Dict]]:
-        """
-        가까운 라인의 오류들을 그룹화
-        
-        Args:
-            errors: 오류 리스트
-            proximity: 그룹화할 라인 간격
-            
-        Returns:
-            그룹화된 오류 리스트
-        """
-        if not errors:
-            return []
-        
-        # LINE으로 정렬
-        sorted_errors = sorted(errors, key=lambda x: x.get('LINE', 0))
-        
-        groups = []
-        current_group = [sorted_errors[0]]
-        
-        for error in sorted_errors[1:]:
-            # 현재 그룹의 마지막 오류와 비교
-            last_line = current_group[-1].get('LINE', 0)
-            current_line = error.get('LINE', 0)
-            
-            if current_line - last_line <= proximity:
-                # 같은 그룹에 추가
-                current_group.append(error)
-            else:
-                # 새 그룹 시작
-                groups.append(current_group)
-                current_group = [error]
-        
-        # 마지막 그룹 추가
-        groups.append(current_group)
-        
-        return groups
-    
-    def extract_context(self, sql_lines: List[str], error_group: List[Dict]) -> Tuple[str, int, int]:
-        """
-        오류 그룹에 대한 컨텍스트 추출
-        
-        Args:
-            sql_lines: SQL 파일의 모든 라인
-            error_group: 오류 그룹
-            
-        Returns:
-            (컨텍스트 코드, 시작 라인, 끝 라인) 튜플
-        """
-        # 그룹 내 최소/최대 라인 번호 찾기
-        min_line = min(err.get('LINE', 1) for err in error_group)
-        max_line = max(err.get('LINE', 1) for err in error_group)
-        
-        # 컨텍스트 범위 계산 (1-based index)
-        start_line = max(1, min_line - self.context_lines)
-        end_line = min(len(sql_lines), max_line + self.context_lines)
-        
-        # 컨텍스트 추출 (0-based index로 변환)
-        context_lines = sql_lines[start_line - 1:end_line]
-        context = ''.join(context_lines)
-        
-        return context, start_line, end_line
-    
-    def build_error_summary(self, error_group: List[Dict], base_line: int) -> str:
-        """
-        오류 그룹 정보를 요약 (상대 라인 번호 사용)
-        
-        Args:
-            error_group: 오류 그룹
-            base_line: 시작 라인 번호
-            
-        Returns:
-            오류 요약 문자열
-        """
-        error_summary = []
-        for idx, error in enumerate(error_group, 1):
-            absolute_line = error.get('LINE', 'N/A')
-            relative_line = absolute_line - base_line + 1 if isinstance(absolute_line, int) else 'N/A'
-            position = error.get('POSITION', 'N/A')
-            text = error.get('TEXT', '')
-            error_summary.append(
-                f"{idx}. 절대 Line {absolute_line} (표시된 코드의 Line {relative_line}), Position {position}: {text}"
-            )
-        
-        return "\n".join(error_summary)
-    
-    def create_fix_prompt(self, context: str, error_group: List[Dict], start_line: int, end_line: int) -> str:
-        """
-        LLM에게 보낼 프롬프트 생성
-        
-        Args:
-            context: 오류 주변 컨텍스트 코드
-            error_group: 오류 그룹
-            start_line: 컨텍스트 시작 라인
-            end_line: 컨텍스트 끝 라인
-            
-        Returns:
-            프롬프트 문자열
-        """
-        error_summary = self.build_error_summary(error_group, start_line)
-        
-        prompt = f"""당신은 오라클 데이터베이스와 PL/SQL 전문가입니다.
-아래의 오라클 프로시저 일부에서 컴파일 오류가 발생했습니다. 오류만 정확히 수정해주세요.
-
-## 컨텍스트 정보:
-- 전체 프로시저 중 Line {start_line} ~ Line {end_line} 부분입니다.
-- 아래 코드에서 Line 1은 원본 파일의 Line {start_line}에 해당합니다.
-
-## 컴파일 오류 목록:
-{error_summary}
-
-## 해당 부분의 코드:
-```sql
-{context}
-```
-
-## 절대적으로 지켜야 할 규칙:
-1. 오류 메시지에서 지적한 문제만 수정하세요.
-2. 원본 코드를 최대한 그대로 유지하세요.
-3. 절대로 주석을 추가하지 마세요 (/* TODO */, /* 수정 필요 */ 등 금지).
-4. 절대로 설명 텍스트를 추가하지 마세요.
-5. 추측으로 코드를 변경하지 마세요.
-6. 컬럼명, 테이블명, 변수명 등 확실하지 않은 것은 원본 그대로 두세요.
-7. 수정된 코드는 즉시 실행 가능해야 합니다.
-8. 원본과 동일한 로직을 유지해야 합니다.
-
-## 출력 형식:
-"=== 수정된 코드 시작 ===" 이라고 쓴 후
-수정된 전체 코드를 제공하고, "=== 수정된 코드 끝 ===" 으로 마무리하세요.
-
-설명이나 사족은 절대 넣지 마세요. 코드만 제공하세요.
-
-## 수정 예시:
-잘못된 수정 (절대 금지):
-```sql
-SELECT 
-  /* 이 부분은 실제 컬럼에 맞게 작성 필요 */
-FROM table_name
-```
-
-올바른 수정:
-```sql
-SELECT 
-  column1, column2  -- 원본에 있던 컬럼 유지
-FROM table_name
-```
-
-반드시 원본 코드의 모든 컬럼, 테이블, 변수를 그대로 유지하면서 오류만 수정하세요.
-"""
-        return prompt
-    
-    def call_llm(self, prompt: str) -> str:
-        """
-        LLM API 호출
-        
-        Args:
-            prompt: 프롬프트 문자열
-            
-        Returns:
-            LLM 응답 텍스트
-        """
+    def call_api(self, system_message: str, user_message: str) -> str:
+        """LLM API 호출"""
         headers = {
-            "Authorization": self.api_key,
+            "Authorization": self.config.api_key,
             "Content-Type": "application/json"
         }
         
@@ -256,316 +78,426 @@ FROM table_name
             "messages": [
                 {
                     "role": "system",
-                    "content": "당신은 오라클 데이터베이스와 PL/SQL 프로그래밍 전문가입니다. 코드의 오류를 정확하게 분석하고 최소한의 수정으로 문제를 해결할 수 있습니다."
+                    "content": system_message
                 },
                 {
                     "role": "user",
-                    "content": prompt
+                    "content": user_message
                 }
             ],
-            "model": self.model
+            "model": self.config.model
         }
         
-        try:
-            response = requests.post(
-                self.api_url,
-                headers=headers,
-                json=payload,
-                timeout=120
-            )
-            response.raise_for_status()
-            
-            # 응답이 text 문자열로 온다고 했으므로
-            result = response.text
-            return result
-            
-        except requests.exceptions.RequestException as e:
-            print(f"LLM API 호출 실패: {e}")
-            return ""
-    
-    def extract_fixed_code(self, llm_response: str) -> str:
-        """
-        LLM 응답에서 수정된 코드 추출
-        
-        Args:
-            llm_response: LLM 응답
-            
-        Returns:
-            수정된 SQL 코드
-        """
-        # 마커를 사용하여 코드 추출
-        start_marker = "=== 수정된 코드 시작 ==="
-        end_marker = "=== 수정된 코드 끝 ==="
-        
-        try:
-            start_idx = llm_response.find(start_marker)
-            end_idx = llm_response.find(end_marker)
-            
-            if start_idx != -1 and end_idx != -1:
-                code = llm_response[start_idx + len(start_marker):end_idx].strip()
-                # SQL 코드 블록 마커 제거
-                code = code.replace("```sql", "").replace("```", "").strip()
-                return code
-            else:
-                # 마커가 없으면 전체 응답 반환
-                print("경고: 코드 마커를 찾을 수 없습니다.")
-                return ""
+        for attempt in range(self.config.retry_count):
+            try:
+                logger.info(f"API 호출 시도 {attempt + 1}/{self.config.retry_count}")
+                response = requests.post(
+                    self.config.api_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=120
+                )
+                response.raise_for_status()
                 
-        except Exception as e:
-            print(f"코드 추출 실패: {e}")
-            return ""
+                # 응답에서 텍스트 추출
+                result = response.json()
+                if isinstance(result, dict):
+                    text = (result.get('text') or 
+                           result.get('content') or
+                           result.get('choices', [{}])[0].get('message', {}).get('content') or
+                           str(result))
+                else:
+                    text = str(result)
+                
+                logger.info("API 호출 성공")
+                return text
+                
+            except requests.exceptions.RequestException as e:
+                logger.error(f"API 호출 실패: {e}")
+                if attempt < self.config.retry_count - 1:
+                    logger.info(f"{self.config.retry_delay}초 후 재시도...")
+                    time.sleep(self.config.retry_delay)
+                else:
+                    raise Exception(f"API 호출 최종 실패: {e}")
+        
+        return ""
+
+
+class SQLChunker:
+    """SQL을 논리적 단위로 분할"""
     
-    def merge_fixed_code(self, original_lines: List[str], fixed_code: str, start_line: int, end_line: int) -> List[str]:
-        """
-        수정된 코드를 원본에 병합
+    def __init__(self, sql_text: str, structure_json: Dict[str, Any]):
+        self.sql_lines = sql_text.split('\n')
+        self.structure = structure_json
         
-        Args:
-            original_lines: 원본 SQL 라인 리스트
-            fixed_code: 수정된 코드
-            start_line: 수정 시작 라인 (1-based)
-            end_line: 수정 끝 라인 (1-based)
+    def get_sql_chunk(self, start_line: int, end_line: int) -> str:
+        """지정된 라인 범위의 SQL 텍스트 추출"""
+        start_idx = max(0, start_line - 1)
+        end_idx = min(len(self.sql_lines), end_line)
+        return '\n'.join(self.sql_lines[start_idx:end_idx])
+    
+    def split_into_chunks(self, max_lines_per_chunk: int = 200) -> List[Dict[str, Any]]:
+        """JSON 구조를 기반으로 SQL을 논리적 단위로 분할"""
+        chunks = []
+        
+        def process_node(node: Dict[str, Any], depth: int = 0):
+            """재귀적으로 노드 처리"""
+            node_type = node.get('type', 'UNKNOWN')
+            start_line = node.get('startLine', 0)
+            end_line = node.get('endLine', 0)
+            children = node.get('children', [])
             
-        Returns:
-            병합된 SQL 라인 리스트
-        """
-        # 수정된 코드를 라인으로 분리
-        fixed_lines = fixed_code.split('\n')
+            # 청크로 만들 주요 단위들
+            chunk_types = {
+                'CREATE_FUNCTION', 'PLPGSQL_BLOCK', 'NESTED_BLOCK',
+                'DECLARE_SECTION', 'IF_STATEMENT', 'LOOP_STATEMENT',
+                'FOR_STATEMENT', 'WHILE_STATEMENT', 'CASE_STATEMENT'
+            }
+            
+            line_count = end_line - start_line + 1
+            
+            should_chunk = (
+                node_type in chunk_types and 
+                start_line > 0 and 
+                end_line > 0 and
+                line_count > 0
+            )
+            
+            if should_chunk:
+                if line_count > max_lines_per_chunk and children:
+                    for child in children:
+                        process_node(child, depth + 1)
+                else:
+                    sql_chunk = self.get_sql_chunk(start_line, end_line)
+                    if sql_chunk.strip():
+                        chunks.append({
+                            'type': node_type,
+                            'start_line': start_line,
+                            'end_line': end_line,
+                            'sql': sql_chunk,
+                            'structure': node,
+                            'depth': depth
+                        })
+            else:
+                for child in children:
+                    process_node(child, depth + 1)
         
-        # 마지막 라인에 개행 문자 추가 (원본 형식 유지)
-        if fixed_lines:
-            fixed_lines = [line + '\n' for line in fixed_lines[:-1]] + [fixed_lines[-1]]
-            if not fixed_lines[-1].endswith('\n') and end_line < len(original_lines):
-                fixed_lines[-1] += '\n'
+        # 루트부터 처리
+        if isinstance(self.structure, dict):
+            process_node(self.structure)
         
-        # 병합: 앞부분 + 수정된 부분 + 뒷부분
-        merged = (
-            original_lines[:start_line - 1] +  # 앞부분 (0-based index)
-            fixed_lines +                       # 수정된 부분
-            original_lines[end_line:]           # 뒷부분 (0-based index)
+        # 청크가 없으면 전체를 하나의 청크로
+        if not chunks:
+            all_sql = '\n'.join(self.sql_lines)
+            if all_sql.strip():
+                chunks.append({
+                    'type': 'FULL_SQL',
+                    'start_line': 1,
+                    'end_line': len(self.sql_lines),
+                    'sql': all_sql,
+                    'structure': self.structure,
+                    'depth': 0
+                })
+        
+        logger.info(f"총 {len(chunks)}개의 청크로 분할되었습니다.")
+        return chunks
+
+
+class PostgresToOracleConverter:
+    """PostgreSQL to Oracle 변환기"""
+    
+    def __init__(self, config: ConversionConfig):
+        self.config = config
+        self.llm_client = LLMClient(config)
+        
+    def get_system_message(self) -> str:
+        """시스템 메시지 생성"""
+        return """당신은 PostgreSQL PL/pgSQL 프로시저를 Oracle PL/SQL 프로시저로 변환하는 전문가입니다.
+
+주요 변환 규칙:
+1. 데이터 타입 변환:
+   - TEXT → VARCHAR2(4000)
+   - SERIAL → NUMBER + SEQUENCE + TRIGGER
+   - BOOLEAN → NUMBER(1) (0/1)
+   - TIMESTAMP → TIMESTAMP 또는 DATE
+   
+2. 함수 및 문법 변환:
+   - RAISE NOTICE → DBMS_OUTPUT.PUT_LINE
+   - := 대입 연산자는 동일하게 사용
+   - || 문자열 연결은 동일하게 사용
+   - PERFORM → 단순 함수 호출로 변경
+   - RETURN NEXT → PIPE ROW로 변경 (필요시)
+   
+3. 블록 구조:
+   - $$로 감싼 함수 본문 → BEGIN...END;로 변경
+   - AS $$ → AS 또는 IS로 변경
+   - LANGUAGE plpgsql → 제거 (Oracle은 기본이 PL/SQL)
+   
+4. 예외 처리:
+   - EXCEPTION WHEN ... THEN → 유사하게 유지
+   - SQLSTATE → Oracle 예외 코드로 변경
+   
+5. 변수 선언:
+   - DECLARE 섹션은 유사하지만 세미콜론 위치 주의
+   
+변환된 코드는 Oracle에서 실행 가능해야 하며, 문법 오류가 없어야 합니다.
+주석으로 변환 내용을 설명하지 말고, 변환된 코드만 출력하세요."""
+
+    def convert_chunk(self, chunk: Dict[str, Any]) -> str:
+        """개별 청크를 변환"""
+        chunk_type = chunk['type']
+        sql = chunk['sql']
+        
+        logger.info(f"청크 변환 중: {chunk_type} (라인 {chunk['start_line']}-{chunk['end_line']})")
+        
+        user_message = f"""다음 PostgreSQL PL/pgSQL 코드를 Oracle PL/SQL로 변환하세요.
+
+코드 타입: {chunk_type}
+
+PostgreSQL 코드:
+```sql
+{sql}
+```
+
+변환된 Oracle PL/SQL 코드만 출력하세요. 추가 설명은 불필요합니다."""
+
+        system_message = self.get_system_message()
+        converted = self.llm_client.call_api(system_message, user_message)
+        
+        # 코드 블록 마커 제거
+        converted = converted.strip()
+        if converted.startswith('```'):
+            lines = converted.split('\n')
+            if lines[0].startswith('```'):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == '```':
+                lines = lines[:-1]
+            converted = '\n'.join(lines)
+        
+        return converted
+    
+    def convert(self, sql_file: str, structure_file: str, output_file: str):
+        """PostgreSQL 프로시저를 Oracle로 변환"""
+        logger.info("변환 프로세스 시작")
+        
+        # 파일 읽기
+        logger.info(f"SQL 파일 읽기: {sql_file}")
+        with open(sql_file, 'r', encoding='utf-8') as f:
+            sql_text = f.read()
+        
+        logger.info(f"구조 JSON 파일 읽기: {structure_file}")
+        with open(structure_file, 'r', encoding='utf-8') as f:
+            structure = json.load(f)
+        
+        # SQL 분할
+        logger.info("SQL을 논리적 단위로 분할 중...")
+        chunker = SQLChunker(sql_text, structure)
+        chunks = chunker.split_into_chunks(max_lines_per_chunk=200)
+        
+        # 각 청크 변환
+        converted_chunks = []
+        total_chunks = len(chunks)
+        
+        for idx, chunk in enumerate(chunks, 1):
+            logger.info(f"\n진행률: {idx}/{total_chunks}")
+            try:
+                converted = self.convert_chunk(chunk)
+                converted_chunks.append({
+                    'original': chunk,
+                    'converted': converted
+                })
+                
+                # API 호출 간 지연 (rate limit 방지)
+                if idx < total_chunks:
+                    time.sleep(1)
+                    
+            except Exception as e:
+                logger.error(f"청크 변환 실패: {e}")
+                converted_chunks.append({
+                    'original': chunk,
+                    'converted': f"-- 변환 실패:\n-- {chunk['sql']}"
+                })
+        
+        # 변환된 청크들을 조합
+        logger.info("\n변환된 청크들을 조합 중...")
+        oracle_sql = self.combine_chunks(converted_chunks)
+        
+        # 결과 저장
+        logger.info(f"결과 저장: {output_file}")
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(oracle_sql)
+        
+        logger.info("변환 완료!")
+        
+        # 통계 출력
+        logger.info(f"\n=== 변환 통계 ===")
+        logger.info(f"총 청크 수: {total_chunks}")
+        logger.info(f"원본 라인 수: {len(sql_text.splitlines())}")
+        logger.info(f"변환된 라인 수: {len(oracle_sql.splitlines())}")
+    
+    def combine_chunks(self, converted_chunks: List[Dict[str, Any]]) -> str:
+        """변환된 청크들을 하나의 Oracle SQL로 조합"""
+        # 전체 함수인 경우 단순 결합
+        if len(converted_chunks) == 1:
+            return converted_chunks[0]['converted']
+        
+        # 전체를 재조합하기 위해 LLM에 한번 더 요청
+        logger.info("최종 조합을 위한 LLM 호출...")
+        
+        combined_text = "\n\n-- ===== 청크 구분 =====\n\n".join(
+            [f"-- 청크 {i+1}: {c['original']['type']}\n{c['converted']}" 
+             for i, c in enumerate(converted_chunks)]
         )
         
-        return merged
-    
-    def save_sql(self, sql_lines: List[str], output_path: str):
-        """
-        SQL 코드를 파일로 저장
-        
-        Args:
-            sql_lines: SQL 라인 리스트
-            output_path: 출력 파일 경로
-        """
+        system_message = """당신은 Oracle PL/SQL 전문가입니다.
+여러 개의 변환된 코드 청크들이 주어집니다.
+이들을 하나의 완전한 Oracle 프로시저/함수로 조합하세요.
+중복된 CREATE 문이나 선언을 제거하고, 올바른 구조로 만드세요.
+실행 가능한 완전한 Oracle PL/SQL 코드만 출력하세요."""
+
+        user_message = f"""다음 Oracle PL/SQL 코드 청크들을 하나의 완전한 프로시저/함수로 조합하세요:
+
+{combined_text}
+
+완전한 Oracle PL/SQL 코드만 출력하세요."""
+
         try:
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.writelines(sql_lines)
-            print(f"✓ 파일 저장 완료: {output_path}")
+            final_code = self.llm_client.call_api(system_message, user_message)
+            
+            # 코드 블록 마커 제거
+            final_code = final_code.strip()
+            if final_code.startswith('```'):
+                lines = final_code.split('\n')
+                if lines[0].startswith('```'):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == '```':
+                    lines = lines[:-1]
+                final_code = '\n'.join(lines)
+            
+            return final_code
+            
         except Exception as e:
-            print(f"파일 저장 실패: {e}")
-    
-    def fix_procedure(self, errors_input: str, sql_file_path: str, output_folder: str = None) -> bool:
-        """
-        프로시저 오류 수정 메인 함수
-        
-        Args:
-            errors_input: 오류 JSON (문자열 또는 파일 경로)
-            sql_file_path: SQL 파일 경로
-            output_folder: 출력 폴더 경로 (없으면 입력 파일과 같은 폴더에 output 폴더 생성)
-            
-        Returns:
-            성공 여부
-        """
-        print("=" * 70)
-        print("오라클 프로시저 자동 수정 시작")
-        print("=" * 70)
-        
-        # 1. 오류 파싱
-        print("\n[1/6] 컴파일 오류 파싱 중...")
-        errors = self.parse_errors(errors_input)
-        if not errors:
-            print("오류 정보를 찾을 수 없습니다.")
-            return False
-        print(f"   ✓ {len(errors)}개의 오류를 발견했습니다.")
-        
-        # 2. SQL 파일 읽기
-        print("\n[2/6] SQL 파일 읽기 중...")
-        sql_lines = self.read_sql_file(sql_file_path)
-        if not sql_lines:
-            print("SQL 파일을 읽을 수 없습니다.")
-            return False
-        total_chars = sum(len(line) for line in sql_lines)
-        print(f"   ✓ {len(sql_lines)}라인, 총 {total_chars:,}자의 SQL 코드를 읽었습니다.")
-        
-        # 3. 오류 그룹화
-        print("\n[3/6] 오류 그룹화 중...")
-        error_groups = self.group_errors_by_proximity(errors)
-        print(f"   ✓ {len(error_groups)}개의 오류 그룹으로 분류했습니다.")
-        
-        # 4. 각 그룹별로 수정
-        print("\n[4/6] 오류 수정 중...")
-        current_lines = sql_lines.copy()
-        
-        for idx, error_group in enumerate(error_groups, 1):
-            print(f"\n   [{idx}/{len(error_groups)}] 그룹 처리 중...")
-            
-            # 컨텍스트 추출
-            context, start_line, end_line = self.extract_context(current_lines, error_group)
-            print(f"      - Line {start_line}~{end_line} ({end_line - start_line + 1}라인, {len(context):,}자)")
-            print(f"      - {len(error_group)}개 오류 포함")
-            
-            # 프롬프트 생성
-            prompt = self.create_fix_prompt(context, error_group, start_line, end_line)
-            
-            # LLM 호출
-            print(f"      - LLM API 호출 중...")
-            llm_response = self.call_llm(prompt)
-            if not llm_response:
-                print(f"      ✗ API 호출 실패")
-                continue
-            
-            # 수정된 코드 추출
-            fixed_code = self.extract_fixed_code(llm_response)
-            if not fixed_code:
-                print(f"      ✗ 수정된 코드 추출 실패")
-                continue
-            
-            print(f"      ✓ 수정 완료 ({len(fixed_code):,}자)")
-            
-            # 원본에 병합
-            current_lines = self.merge_fixed_code(current_lines, fixed_code, start_line, end_line)
-        
-        # 5. 결과 저장
-        print("\n[5/6] 수정된 파일 저장 중...")
-        
-        # output 폴더 경로 생성
-        if output_folder is None:
-            input_path = Path(sql_file_path)
-            output_folder = input_path.parent / "output"
-        else:
-            output_folder = Path(output_folder)
-        
-        # output 폴더 생성
-        output_folder.mkdir(exist_ok=True)
-        
-        # 출력 파일 경로
-        original_filename = Path(sql_file_path).name
-        output_path = output_folder / original_filename
-        
-        self.save_sql(current_lines, str(output_path))
-        
-        print("\n[6/6] 완료!")
-        print("=" * 70)
-        print(f"✓ 수정된 파일: {output_path}")
-        print(f"✓ 총 {len(error_groups)}개 그룹, {len(errors)}개 오류 처리 완료")
-        print("=" * 70)
-        
-        return True
+            logger.error(f"최종 조합 실패: {e}")
+            return "\n\n".join([c['converted'] for c in converted_chunks])
 
 
 def main():
-    """
-    메인 실행 함수
-    
-    사용법 1: 상단 설정 사용 (파일을 직접 실행)
-        python oracle_fixer.py
-    
-    사용법 2: 명령줄 인자 사용 (개별 파라미터 지정)
-        python oracle_fixer.py -e errors.json -s procedure.sql -u API_URL -k API_KEY
-    """
-    parser = argparse.ArgumentParser(
-        description="오라클 프로시저 컴파일 오류 자동 수정 도구",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-사용 방법:
-
-1. 상단 설정값을 수정하고 실행:
-   python oracle_fixer.py
-
-2. 명령줄 인자로 실행:
-   python oracle_fixer.py -e errors.json -s procedure.sql -u API_URL -k API_KEY
-        """
-    )
-    
-    parser.add_argument('-e', '--errors',
-                        help='컴파일 오류 JSON 파일명 (또는 경로)')
-    parser.add_argument('-s', '--sql',
-                        help='수정할 SQL 파일명 (또는 경로)')
-    parser.add_argument('-u', '--url',
-                        help='LLM API URL')
-    parser.add_argument('-k', '--key',
-                        help='LLM API 인증 키')
-    parser.add_argument('-f', '--folder',
-                        help='JSON과 SQL이 있는 폴더 경로')
-    parser.add_argument('-m', '--model',
-                        help='사용할 LLM 모델')
-    parser.add_argument('-o', '--output',
-                        help='출력 폴더 경로')
-    parser.add_argument('-c', '--context', type=int,
-                        help='오류 라인 주변으로 포함할 라인 수')
-    
-    args = parser.parse_args()
-    
-    # 명령줄 인자가 있으면 우선, 없으면 상단 설정 사용
-    api_url = args.url if args.url else API_URL
-    api_key = args.key if args.key else API_KEY
-    model = args.model if args.model else MODEL
-    context_lines = args.context if args.context else CONTEXT_LINES
-    
-    input_folder = args.folder if args.folder else INPUT_FOLDER
-    input_folder = Path(input_folder)
-    
-    errors_file = args.errors if args.errors else ERRORS_JSON_FILE
-    sql_file = args.sql if args.sql else SQL_FILE
-    
-    # 파일 경로 구성 (상대 경로면 input_folder 기준, 절대 경로면 그대로)
-    errors_path = Path(errors_file)
-    if not errors_path.is_absolute():
-        errors_path = input_folder / errors_file
-    
-    sql_path = Path(sql_file)
-    if not sql_path.is_absolute():
-        sql_path = input_folder / sql_file
-    
-    output_folder = args.output if args.output else None
-    
-    # 설정 정보 출력
-    print("\n" + "=" * 70)
-    print("설정 정보")
+    """메인 함수"""
     print("=" * 70)
-    print(f"API URL: {api_url}")
-    print(f"Model: {model}")
-    print(f"Input Folder: {input_folder}")
-    print(f"Errors File: {errors_path}")
-    print(f"SQL File: {sql_path}")
-    print(f"Output Folder: {output_folder if output_folder else str(input_folder / 'output')}")
-    print(f"Context Lines: {context_lines}")
+    print("PostgreSQL → Oracle 변환 프로그램")
     print("=" * 70)
+    print()
+    
+    # 설정 검증
+    if API_URL == "https://your-company-api.com/v1/chat/completions":
+        print("⚠️  경고: API_URL을 설정하지 않았습니다!")
+        print("파일 상단의 API_URL을 수정하세요.")
+        sys.exit(1)
+    
+    if API_KEY == "your-api-key-here":
+        print("⚠️  경고: API_KEY를 설정하지 않았습니다!")
+        print("파일 상단의 API_KEY를 수정하세요.")
+        sys.exit(1)
+    
+    # 입력 폴더 확인
+    if not os.path.exists(INPUT_FOLDER):
+        print(f"❌ 입력 폴더를 찾을 수 없습니다: {INPUT_FOLDER}")
+        print("파일 상단의 INPUT_FOLDER 경로를 확인하세요.")
+        sys.exit(1)
+    
+    # 파일 경로 구성
+    sql_file = os.path.join(INPUT_FOLDER, SQL_FILE_NAME)
+    json_file = os.path.join(INPUT_FOLDER, JSON_FILE_NAME)
     
     # 파일 존재 확인
-    if not errors_path.exists():
-        print(f"\n오류: JSON 파일을 찾을 수 없습니다: {errors_path}")
-        exit(1)
+    if not os.path.exists(sql_file):
+        print(f"❌ SQL 파일을 찾을 수 없습니다: {sql_file}")
+        sys.exit(1)
     
-    if not sql_path.exists():
-        print(f"\n오류: SQL 파일을 찾을 수 없습니다: {sql_path}")
-        exit(1)
+    if not os.path.exists(json_file):
+        print(f"❌ JSON 파일을 찾을 수 없습니다: {json_file}")
+        sys.exit(1)
     
-    # Fixer 객체 생성
-    fixer = OracleProcedureFixer(
-        api_url=api_url,
-        api_key=api_key,
-        model=model,
-        context_lines=context_lines
+    # 출력 폴더 생성
+    output_folder = os.path.join(INPUT_FOLDER, "output")
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # 출력 파일 경로
+    sql_basename = os.path.splitext(SQL_FILE_NAME)[0]
+    output_file = os.path.join(output_folder, f"{sql_basename}_oracle.sql")
+    
+    # 설정 출력
+    print("📋 설정 정보")
+    print("-" * 70)
+    print(f"API URL   : {API_URL}")
+    print(f"모델      : {MODEL}")
+    print(f"입력 폴더 : {INPUT_FOLDER}")
+    print(f"SQL 파일  : {SQL_FILE_NAME}")
+    print(f"JSON 파일 : {JSON_FILE_NAME}")
+    print(f"출력 폴더 : {output_folder}")
+    print(f"출력 파일 : {os.path.basename(output_file)}")
+    print("-" * 70)
+    print()
+    
+    # 파일 크기 확인
+    sql_size = os.path.getsize(sql_file)
+    sql_lines = sum(1 for _ in open(sql_file, 'r', encoding='utf-8'))
+    print(f"📄 SQL 파일 정보: {sql_size:,} bytes, {sql_lines:,} 줄")
+    print()
+    
+    # 사용자 확인
+    response = input("변환을 시작하시겠습니까? (y/n): ").strip().lower()
+    if response != 'y':
+        print("변환이 취소되었습니다.")
+        sys.exit(0)
+    
+    print()
+    print("=" * 70)
+    print("변환 시작...")
+    print("=" * 70)
+    print()
+    
+    # 설정 생성
+    config = ConversionConfig(
+        api_url=API_URL,
+        api_key=API_KEY,
+        model=MODEL,
+        max_tokens_per_chunk=MAX_TOKENS_PER_CHUNK,
+        retry_count=RETRY_COUNT,
+        retry_delay=RETRY_DELAY
     )
     
-    # 프로시저 수정 실행
-    success = fixer.fix_procedure(
-        errors_input=str(errors_path),
-        sql_file_path=str(sql_path),
-        output_folder=output_folder
-    )
-    
-    if not success:
-        exit(1)
+    # 변환 실행
+    try:
+        converter = PostgresToOracleConverter(config)
+        converter.convert(sql_file, json_file, output_file)
+        
+        print()
+        print("=" * 70)
+        print("✅ 변환 완료!")
+        print("=" * 70)
+        print(f"결과 파일: {output_file}")
+        
+        # 출력 파일 정보
+        output_size = os.path.getsize(output_file)
+        output_lines = sum(1 for _ in open(output_file, 'r', encoding='utf-8'))
+        print(f"출력 크기: {output_size:,} bytes, {output_lines:,} 줄")
+        print("=" * 70)
+        
+    except Exception as e:
+        print()
+        print("=" * 70)
+        print("❌ 변환 실패!")
+        print("=" * 70)
+        print(f"오류: {e}")
+        print()
+        print("해결 방법:")
+        print("1. API URL과 키가 올바른지 확인하세요")
+        print("2. 네트워크 연결을 확인하세요")
+        print("3. SQL과 JSON 파일이 올바른지 확인하세요")
+        sys.exit(1)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
+
