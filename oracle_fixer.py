@@ -56,6 +56,10 @@ class PlpgsqlToOracleConverter:
         
         print(f"✓ SQL 파일 로드 완료: {len(self.sql_lines)} 라인")
         print(f"✓ Structure 파일 로드 완료")
+        print(f"  - 최상위 타입: {self.structure.get('type', 'UNKNOWN')}")
+        print(f"  - 자식 노드 수: {len(self.structure.get('children', []))}")
+        if self.structure.get('children'):
+            print(f"  - 첫 번째 자식 타입: {self.structure['children'][0].get('type', 'UNKNOWN')}")
         print(f"✓ 출력 디렉토리: {self.output_dir}")
     
     def get_sql_text(self, start_line: int, end_line: int) -> str:
@@ -76,19 +80,28 @@ class PlpgsqlToOracleConverter:
         end_line = node.get('endLine', 0)
         children = node.get('children', [])
         
+        # 디버그: 최상위 노드 정보 출력
+        if depth == 0:
+            print(f"[디버그] 최상위 노드: type={node_type}, startLine={start_line}, endLine={end_line}, children={len(children)}")
+        
         # 라인 수 계산
         line_count = end_line - start_line + 1
         
-        # 최상위 노드는 건너뛰기
-        if node_type == 'ROOT':
+        # 최상위 노드는 건너뛰기 (ROOT, FILE 등)
+        if node_type in ['ROOT', 'FILE']:
+            if not children:
+                print(f"[경고] {node_type} 노드에 children이 없습니다!")
+                return chunks
             for child in children:
                 chunks.extend(self.split_into_chunks(child, depth + 1))
             return chunks
         
-        # CREATE_FUNCTION은 SPEC, DECLARE, BEGIN으로 분할
-        if node_type == 'CREATE_FUNCTION':
-            # SPEC 부분 처리
-            spec_node = next((c for c in children if c.get('type') == 'SPEC'), None)
+        # 프로시저/함수 노드 (CREATE_FUNCTION, PROCEDURE 등)
+        if node_type in ['CREATE_FUNCTION', 'PROCEDURE', 'CREATE_PROCEDURE', 'FUNCTION']:
+            print(f"[디버그] 프로시저 발견: {node_type} (lines {start_line}-{end_line})")
+            
+            # SPEC 부분 처리 (SPECIFICATION, HEADER 등도 지원)
+            spec_node = next((c for c in children if c.get('type') in ['SPEC', 'SPECIFICATION', 'HEADER']), None)
             if spec_node:
                 chunks.append({
                     'type': 'SPEC',
@@ -98,8 +111,8 @@ class PlpgsqlToOracleConverter:
                     'description': 'Procedure Specification'
                 })
             
-            # DECLARE 부분 처리
-            declare_node = next((c for c in children if c.get('type') == 'DECLARE'), None)
+            # DECLARE 부분 처리 (DECLARATIONS, VARIABLES 등도 지원)
+            declare_node = next((c for c in children if c.get('type') in ['DECLARE', 'DECLARATIONS', 'VARIABLES']), None)
             if declare_node:
                 chunks.append({
                     'type': 'DECLARE',
@@ -109,23 +122,31 @@ class PlpgsqlToOracleConverter:
                     'description': 'Variable Declarations'
                 })
             
-            # BEGIN 부분 처리 - 이 부분이 제일 크므로 세분화
-            begin_node = next((c for c in children if c.get('type') == 'BEGIN'), None)
+            # BEGIN 부분 처리 (BODY, BLOCK 등도 지원)
+            begin_node = next((c for c in children if c.get('type') in ['BEGIN', 'BODY', 'BLOCK']), None)
             if begin_node:
                 chunks.extend(self.split_begin_block(begin_node))
+            else:
+                # BEGIN 블록이 명시적으로 없으면 모든 자식을 BEGIN으로 처리
+                print(f"[디버그] BEGIN 블록이 없어서 모든 자식을 처리합니다")
+                for child in children:
+                    if child.get('type') not in ['SPEC', 'SPECIFICATION', 'HEADER', 'DECLARE', 'DECLARATIONS', 'VARIABLES']:
+                        chunks.extend(self.split_into_chunks(child, depth + 1))
             
             return chunks
         
         # 기타 노드 처리
-        if line_count <= MAX_LINES_PER_CHUNK:
-            # 작은 블록은 그대로 추가
-            chunks.append({
-                'type': node_type,
-                'startLine': start_line,
-                'endLine': end_line,
-                'text': self.get_sql_text(start_line, end_line),
-                'description': f'{node_type} block'
-            })
+        if line_count <= MAX_LINES_PER_CHUNK or line_count <= 0:
+            # 작은 블록은 그대로 추가 (line_count가 0이면 startLine == endLine이므로 유효한 텍스트 확인)
+            text = self.get_sql_text(start_line, end_line)
+            if text.strip():  # 실제 텍스트가 있는 경우만 추가
+                chunks.append({
+                    'type': node_type,
+                    'startLine': start_line,
+                    'endLine': end_line,
+                    'text': text,
+                    'description': f'{node_type} block'
+                })
         else:
             # 큰 블록은 자식으로 분할
             if children:
@@ -237,24 +258,48 @@ class PlpgsqlToOracleConverter:
         }
         
         try:
+            print(f"    [API] 요청 전송 중... (메시지 길이: {len(user_message)} 문자)")
             response = requests.post(LLM_URL, headers=headers, json=data, timeout=120)
+            
+            # 응답 상태 확인
+            if response.status_code != 200:
+                error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+                print(f"    [API 오류] {error_msg}")
+                return f"-- API ERROR: {error_msg}\n-- Original PostgreSQL Code:\n{user_message}"
+            
             response.raise_for_status()
             
-            # 응답에서 text 추출 (실제 API 응답 형식에 맞게 조정 필요)
+            # 응답에서 text 추출
             result = response.json()
             
             # 일반적인 OpenAI 호환 API 형식
             if 'choices' in result and len(result['choices']) > 0:
-                return result['choices'][0]['message']['content']
+                content = result['choices'][0]['message']['content']
+                print(f"    [API] 응답 받음 ({len(content)} 문자)")
+                return content
             # 직접 text 반환 형식
             elif 'text' in result:
+                print(f"    [API] 응답 받음 ({len(result['text'])} 문자)")
                 return result['text']
+            # content 필드
+            elif 'content' in result:
+                print(f"    [API] 응답 받음 ({len(result['content'])} 문자)")
+                return result['content']
             else:
+                print(f"    [API 경고] 예상치 못한 응답 형식: {list(result.keys())}")
                 return str(result)
                 
+        except requests.exceptions.Timeout:
+            print(f"    [API 오류] 타임아웃 (120초 초과)")
+            return f"-- TIMEOUT ERROR\n-- Original PostgreSQL Code:\n{user_message}"
+        except requests.exceptions.RequestException as e:
+            print(f"    [API 오류] 네트워크 오류: {e}")
+            return f"-- NETWORK ERROR: {e}\n-- Original PostgreSQL Code:\n{user_message}"
         except Exception as e:
-            print(f"✗ LLM API 호출 실패: {e}")
-            return f"-- ERROR: {e}\n{user_message}"
+            print(f"    [API 오류] 예상치 못한 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return f"-- ERROR: {e}\n-- Original PostgreSQL Code:\n{user_message}"
     
     def convert_chunk(self, chunk: Dict[str, Any], chunk_index: int, total_chunks: int) -> str:
         """단일 청크를 Oracle로 변환"""
@@ -334,10 +379,22 @@ Oracle PL/SQL:"""
         chunks = self.split_into_chunks(self.structure)
         print(f"✓ 총 {len(chunks)}개의 청크로 분할 완료\n")
         
+        # 청크가 없거나 비정상적인 경우 경고
+        if not chunks:
+            print("[경고] 청크가 하나도 생성되지 않았습니다!")
+            print("structure.json 파일 구조를 확인하세요.")
+            print("\n현재 structure.json 구조:")
+            print(json.dumps(self.structure, indent=2, ensure_ascii=False)[:500] + "...")
+            return None
+        
         # 청크 정보 출력
         print("청크 목록:")
         for i, chunk in enumerate(chunks, 1):
-            print(f"  {i}. {chunk['type']}: {chunk['description']} (lines {chunk['startLine']}-{chunk['endLine']}, {chunk['endLine']-chunk['startLine']+1} lines)")
+            line_count = chunk['endLine'] - chunk['startLine'] + 1
+            text_preview = chunk['text'][:50].replace('\n', ' ') if chunk['text'] else '(empty)'
+            print(f"  {i}. {chunk['type']}: {chunk['description']}")
+            print(f"      라인: {chunk['startLine']}-{chunk['endLine']} ({line_count} lines)")
+            print(f"      미리보기: {text_preview}...")
         print()
         
         # 2단계: 각 청크를 LLM으로 변환
@@ -403,7 +460,10 @@ def main():
         converter = PlpgsqlToOracleConverter(WORK_DIR, SQL_FILE_NAME, STRUCTURE_FILE_NAME)
         output_file = converter.convert()
         
-        print(f"\n✓ 성공! 변환된 파일: {output_file}")
+        if output_file:
+            print(f"\n✓ 성공! 변환된 파일: {output_file}")
+        else:
+            print(f"\n✗ 변환 실패! 위의 오류 메시지를 확인하세요.")
         
     except FileNotFoundError as e:
         print(f"\n✗ 파일을 찾을 수 없습니다: {e}")
