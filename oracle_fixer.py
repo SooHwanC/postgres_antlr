@@ -467,41 +467,57 @@ class PlpgsqlToOracleConverter:
 - EXIT WHEN condition; (동일)
 
 [CTE (WITH 절) 변환 규칙 - 매우 중요!]
-1. FROM 절이 없는 SELECT → FROM DUAL 추가 필수
-   잘못: WITH params AS (SELECT p_month_cd::varchar AS pr_month_cd, ...)
-   올바름: WITH params AS (SELECT p_month_cd AS pr_month_cd, ... FROM DUAL)
 
-2. 타입 캐스팅 제거 (CTE 내부)
-   잘못: p_month_cd::varchar AS pr_month_cd
-   올바름: p_month_cd AS pr_month_cd
-   잘못: date_part('day', last_day(to_date(v_STOCK_MONTH,'yyyymm')))::numeric
-   올바름: EXTRACT(DAY FROM LAST_DAY(TO_DATE(v_STOCK_MONTH,'YYYYMM'))) AS days_in_month
+★★★ WITH 절은 완전히 제거하고 인라인 서브쿼리로 변환하세요 ★★★
 
-3. CROSS JOIN params 패턴 제거
-   PostgreSQL: FROM table1 CROSS JOIN params pr
-   Oracle: params를 제거하고 변수 직접 사용
-   예: pr.pr_month_cd → p_month_cd
+PostgreSQL 패턴:
+  WITH
+    A AS (SELECT ...),
+    B AS (SELECT ... FROM A),
+    C AS (SELECT ... FROM B)
+  INSERT INTO table (...)
+  SELECT ... FROM C
+  LEFT JOIN A ...
 
-4. RIGHT JOIN → LEFT JOIN으로 변경
-   PostgreSQL: FROM A RIGHT JOIN B ON ...
-   Oracle: FROM B LEFT JOIN A ON ... (테이블 순서 바꾸기)
+Oracle 변환 (WITH 제거, 모든 CTE를 서브쿼리로):
+  INSERT /*+ monitor */ INTO table (...)
+  SELECT ...
+  FROM (
+    -- C를 인라인 서브쿼리로
+    SELECT ... 
+    FROM (
+      -- B를 인라인 서브쿼리로
+      SELECT ... 
+      FROM (
+        -- A를 인라인 서브쿼리로
+        SELECT ...
+      ) A
+    ) B
+  ) C
+  LEFT JOIN (
+    -- A를 다시 사용하는 경우도 인라인으로
+    SELECT ...
+  ) A ON ...
 
-5. 복잡한 다단계 CTE → 인라인 서브쿼리로 변환 권장
-   - CTE를 FROM 절의 서브쿼리로 이동
-   - 재사용되는 CTE만 유지하고 나머지는 인라인화
-   
-6. CTE JOIN → 상관 서브쿼리 변환 (성능 최적화)
-   PostgreSQL: 
-     LEFT JOIN cte_table k ON k.month_cd = MAT.month_cd AND k.resource = MAT.resource
-     사용: k.smg_prd_qty
-   
-   Oracle 변환:
-     (SELECT smg_prd_qty FROM cte_table k 
-      WHERE k.month_cd = MAT.month_cd AND k.resource = MAT.resource)
+핵심 변환 규칙:
+1. WITH 키워드 완전 제거
+2. 모든 CTE를 FROM 절의 인라인 서브쿼리 (subquery) 로 변환
+3. CTE 별칭 유지 (예: ) MAT, ) CODE, ) P 등)
+4. 타입 캐스팅 제거: p_month_cd::varchar → p_month_cd
+5. date_part() → EXTRACT(): date_part('day', ...) → EXTRACT(DAY FROM ...)
+6. CROSS JOIN params 제거하고 변수 직접 참조
+7. RIGHT JOIN → LEFT JOIN (테이블 순서 변경)
+8. CTE JOIN을 상관 서브쿼리로:
+   LEFT JOIN cte ON cte.id = t.id 사용: cte.value
+   → (SELECT value FROM table WHERE id = t.id)
 
-7. 힌트 추가 가능
-   INSERT /*+ monitor */ INTO ... 
-   SELECT /*+ use_hash(a b) full(table_name) */ ...
+예시:
+PostgreSQL:
+  WITH params AS (SELECT p_val AS val)
+  SELECT * FROM table1 CROSS JOIN params
+
+Oracle:
+  SELECT * FROM table1  -- params 제거, p_val 직접 사용
 
 [구분자 제거]
 - $procedure$, $function$, $$, $body$ 등 모든 PostgreSQL 달러 구분자 제거
@@ -516,7 +532,14 @@ class PlpgsqlToOracleConverter:
 - 이전/다음 청크의 맥락을 참고하여 변수 참조, 블록 구조 등을 올바르게 처리
 - 불완전한 문장의 경우 맥락을 보고 완성
 - 변환된 Oracle PL/SQL 코드만 반환 (설명, 주석, 마크다운 불필요)
-- 원본 코드의 들여쓰기와 가독성 유지"""
+- 원본 코드의 들여쓰기와 가독성 유지
+
+[WITH 절 처리 - 최우선 규칙]
+★ PostgreSQL의 WITH ... CTE 구문을 발견하면:
+  1. WITH 키워드 완전 제거
+  2. 모든 CTE (Common Table Expression)를 FROM 절의 인라인 서브쿼리로 변환
+  3. 예: WITH A AS (SELECT ...) SELECT * FROM A
+     → SELECT * FROM (SELECT ...) A"""
 
         # 맥락 정보 구성
         context_info = ""
@@ -546,20 +569,25 @@ class PlpgsqlToOracleConverter:
 - 블록 키워드(IF, LOOP, BEGIN 등) 뒤에는 세미콜론 불필요
 - END IF;, END LOOP;, END; 형식 준수
 
-★ CTE(WITH 절) 변환 시 특별 주의:
-1. FROM 없는 SELECT → FROM DUAL 추가
-   예: WITH params AS (SELECT p_val AS val) 
-   →  WITH params AS (SELECT p_val AS val FROM DUAL)
+★★★ CTE(WITH 절) 변환 시 특별 주의 ★★★
 
-2. ::varchar, ::numeric 등 타입캐스팅 제거
-   예: p_month_cd::varchar → p_month_cd
-   
-3. date_part() → EXTRACT()
-   예: date_part('day', last_day(...)) → EXTRACT(DAY FROM LAST_DAY(...))
+【필수】 WITH 절은 완전히 제거하고 모든 CTE를 인라인 서브쿼리로 변환하세요!
 
-4. CROSS JOIN params → 변수 직접 참조 또는 서브쿼리로 변경
+PostgreSQL:
+  WITH A AS (...), B AS (...) INSERT INTO ... SELECT ... FROM B LEFT JOIN A
 
-5. 복잡한 다단계 CTE는 인라인 뷰나 서브쿼리로 단순화 권장"""
+Oracle:
+  INSERT INTO ... SELECT ... FROM (...서브쿼리...) B LEFT JOIN (...서브쿼리...) A
+
+변환 체크리스트:
+1. ✓ WITH 키워드 제거
+2. ✓ 모든 CTE를 FROM 절 인라인 서브쿼리로 변환
+3. ✓ 별칭 유지 (예: ) MAT, ) CODE, ) P)
+4. ✓ ::varchar, ::numeric 타입캐스팅 제거
+5. ✓ date_part('field', date) → EXTRACT(FIELD FROM date)
+6. ✓ CROSS JOIN params 제거 (변수 직접 참조)
+7. ✓ RIGHT JOIN → LEFT JOIN (테이블 순서 변경)
+8. ✓ 상관 서브쿼리 활용: (SELECT col FROM tbl WHERE tbl.id = outer.id)"""
         
         user_message = f"""다음 PostgreSQL PL/pgSQL 코드를 Oracle PL/SQL로 완벽하게 변환하세요.
 
