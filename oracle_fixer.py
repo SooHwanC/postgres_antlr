@@ -420,6 +420,13 @@ class PlpgsqlToOracleConverter:
 - boolean → NUMBER(1) 또는 BOOLEAN (Oracle 23c+)
 - integer, int → NUMBER 또는 INTEGER
 
+[타입 캐스팅]
+- PostgreSQL의 ::type 캐스팅 제거 또는 CAST 함수로 변환
+  예1: p_month_cd::varchar → p_month_cd (변수는 타입캐스팅 불필요)
+  예2: column_name::numeric → CAST(column_name AS NUMBER)
+  예3: value::varchar → TO_CHAR(value)
+  예4: value::date → TO_DATE(value, format)
+
 [함수 및 연산자]
 - NOW() → SYSDATE
 - CURRENT_TIMESTAMP → SYSTIMESTAMP
@@ -427,9 +434,16 @@ class PlpgsqlToOracleConverter:
 - SUBSTRING(str, pos, len) → SUBSTR(str, pos, len)
 - POSITION(substr IN str) → INSTR(str, substr)
 - LENGTH() → LENGTH() (동일)
-- COALESCE() → NVL() 또는 COALESCE() (동일)
-- CONCAT() → || 연산자 사용
+- COALESCE(val1, val2, ...) → NVL(val1, val2) 또는 COALESCE() (동일)
+- CONCAT(str1, str2) → str1 || str2
 - EXTRACT(field FROM timestamp) → EXTRACT(field FROM timestamp) (동일)
+- date_part('field', date) → EXTRACT(FIELD FROM date)
+- last_day(date) → LAST_DAY(date) (동일)
+
+[Oracle 특화 함수 활용 권장]
+- DECODE(expr, search1, result1, ..., default) - CASE 대신 사용 가능
+- NVL(expr, replace_value) - NULL 처리
+- NULLIF(expr1, expr2) - 두 값이 같으면 NULL 반환
 
 [출력 및 로깅]
 - RAISE NOTICE → DBMS_OUTPUT.PUT_LINE
@@ -451,6 +465,43 @@ class PlpgsqlToOracleConverter:
 - WHILE condition LOOP ... END LOOP; (동일)
 - FOR i IN 1..10 LOOP ... END LOOP; (동일)
 - EXIT WHEN condition; (동일)
+
+[CTE (WITH 절) 변환 규칙 - 매우 중요!]
+1. FROM 절이 없는 SELECT → FROM DUAL 추가 필수
+   잘못: WITH params AS (SELECT p_month_cd::varchar AS pr_month_cd, ...)
+   올바름: WITH params AS (SELECT p_month_cd AS pr_month_cd, ... FROM DUAL)
+
+2. 타입 캐스팅 제거 (CTE 내부)
+   잘못: p_month_cd::varchar AS pr_month_cd
+   올바름: p_month_cd AS pr_month_cd
+   잘못: date_part('day', last_day(to_date(v_STOCK_MONTH,'yyyymm')))::numeric
+   올바름: EXTRACT(DAY FROM LAST_DAY(TO_DATE(v_STOCK_MONTH,'YYYYMM'))) AS days_in_month
+
+3. CROSS JOIN params 패턴 제거
+   PostgreSQL: FROM table1 CROSS JOIN params pr
+   Oracle: params를 제거하고 변수 직접 사용
+   예: pr.pr_month_cd → p_month_cd
+
+4. RIGHT JOIN → LEFT JOIN으로 변경
+   PostgreSQL: FROM A RIGHT JOIN B ON ...
+   Oracle: FROM B LEFT JOIN A ON ... (테이블 순서 바꾸기)
+
+5. 복잡한 다단계 CTE → 인라인 서브쿼리로 변환 권장
+   - CTE를 FROM 절의 서브쿼리로 이동
+   - 재사용되는 CTE만 유지하고 나머지는 인라인화
+   
+6. CTE JOIN → 상관 서브쿼리 변환 (성능 최적화)
+   PostgreSQL: 
+     LEFT JOIN cte_table k ON k.month_cd = MAT.month_cd AND k.resource = MAT.resource
+     사용: k.smg_prd_qty
+   
+   Oracle 변환:
+     (SELECT smg_prd_qty FROM cte_table k 
+      WHERE k.month_cd = MAT.month_cd AND k.resource = MAT.resource)
+
+7. 힌트 추가 가능
+   INSERT /*+ monitor */ INTO ... 
+   SELECT /*+ use_hash(a b) full(table_name) */ ...
 
 [구분자 제거]
 - $procedure$, $function$, $$, $body$ 등 모든 PostgreSQL 달러 구분자 제거
@@ -493,7 +544,22 @@ class PlpgsqlToOracleConverter:
 이 부분은 실행 블록입니다.
 - 각 SQL 문 끝에 세미콜론 필요
 - 블록 키워드(IF, LOOP, BEGIN 등) 뒤에는 세미콜론 불필요
-- END IF;, END LOOP;, END; 형식 준수"""
+- END IF;, END LOOP;, END; 형식 준수
+
+★ CTE(WITH 절) 변환 시 특별 주의:
+1. FROM 없는 SELECT → FROM DUAL 추가
+   예: WITH params AS (SELECT p_val AS val) 
+   →  WITH params AS (SELECT p_val AS val FROM DUAL)
+
+2. ::varchar, ::numeric 등 타입캐스팅 제거
+   예: p_month_cd::varchar → p_month_cd
+   
+3. date_part() → EXTRACT()
+   예: date_part('day', last_day(...)) → EXTRACT(DAY FROM LAST_DAY(...))
+
+4. CROSS JOIN params → 변수 직접 참조 또는 서브쿼리로 변경
+
+5. 복잡한 다단계 CTE는 인라인 뷰나 서브쿼리로 단순화 권장"""
         
         user_message = f"""다음 PostgreSQL PL/pgSQL 코드를 Oracle PL/SQL로 완벽하게 변환하세요.
 
