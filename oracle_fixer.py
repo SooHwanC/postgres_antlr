@@ -175,14 +175,21 @@ class PlpgsqlToOracleConverter:
         if not children:
             # 자식이 없으면 전체를 하나의 청크로
             total_lines = begin_node['endLine'] - begin_node['startLine'] + 1
+            block_text = self.get_sql_text(begin_node['startLine'], begin_node['endLine'])
+            
+            # CTE 구문이 포함되어 있으면 절대 자르지 않음
             if total_lines > MAX_LINES_PER_CHUNK:
-                # 너무 크면 강제 분할
-                return self.split_large_block('BEGIN', begin_node['startLine'], begin_node['endLine'])
+                if self.contains_cte(block_text):
+                    print(f"[CTE 감지] BEGIN 블록 {total_lines} 라인, CTE 포함으로 분할하지 않음")
+                else:
+                    # CTE가 없으면 강제 분할
+                    return self.split_large_block('BEGIN', begin_node['startLine'], begin_node['endLine'])
+            
             return [{
                 'type': 'BEGIN',
                 'startLine': begin_node['startLine'],
                 'endLine': begin_node['endLine'],
-                'text': self.get_sql_text(begin_node['startLine'], begin_node['endLine']),
+                'text': block_text,
                 'description': 'Main BEGIN block'
             }]
         
@@ -204,8 +211,13 @@ class PlpgsqlToOracleConverter:
                     if group_chunk:
                         group_lines = group_chunk['endLine'] - group_chunk['startLine'] + 1
                         if group_lines > MAX_LINES_PER_CHUNK:
-                            print(f"[경고] 그룹이 너무 큽니다 ({group_lines} 라인). 강제 분할합니다.")
-                            chunks.extend(self.split_large_block('STATEMENTS', group_chunk['startLine'], group_chunk['endLine']))
+                            # CTE 체크
+                            if self.contains_cte(group_chunk['text']):
+                                print(f"[CTE 감지] 그룹 {group_lines} 라인, CTE 포함으로 분할하지 않음")
+                                chunks.append(group_chunk)
+                            else:
+                                print(f"[경고] 그룹이 너무 큽니다 ({group_lines} 라인). 강제 분할합니다.")
+                                chunks.extend(self.split_large_block('STATEMENTS', group_chunk['startLine'], group_chunk['endLine']))
                         else:
                             chunks.append(group_chunk)
                     current_group = []
@@ -244,8 +256,13 @@ class PlpgsqlToOracleConverter:
             if group_chunk:
                 group_lines = group_chunk['endLine'] - group_chunk['startLine'] + 1
                 if group_lines > MAX_LINES_PER_CHUNK:
-                    print(f"[경고] 마지막 그룹이 너무 큽니다 ({group_lines} 라인). 강제 분할합니다.")
-                    chunks.extend(self.split_large_block('STATEMENTS', group_chunk['startLine'], group_chunk['endLine']))
+                    # CTE 체크
+                    if self.contains_cte(group_chunk['text']):
+                        print(f"[CTE 감지] 마지막 그룹 {group_lines} 라인, CTE 포함으로 분할하지 않음")
+                        chunks.append(group_chunk)
+                    else:
+                        print(f"[경고] 마지막 그룹이 너무 큽니다 ({group_lines} 라인). 강제 분할합니다.")
+                        chunks.extend(self.split_large_block('STATEMENTS', group_chunk['startLine'], group_chunk['endLine']))
                 else:
                     chunks.append(group_chunk)
         
@@ -274,10 +291,27 @@ class PlpgsqlToOracleConverter:
         }
     
     def split_large_block(self, block_type: str, start_line: int, end_line: int) -> List[Dict[str, Any]]:
-        """큰 블록을 강제로 라인 단위로 분할"""
+        """큰 블록을 강제로 라인 단위로 분할 (CTE 구문은 예외)"""
         chunks = []
-        current_start = start_line
         
+        # 전체 텍스트 가져오기
+        full_text = self.get_sql_text(start_line, end_line)
+        
+        # CTE 구문 감지 (WITH ... INSERT/SELECT/UPDATE/DELETE)
+        # CTE가 있으면 절대 자르지 않음
+        if self.contains_cte(full_text):
+            line_count = end_line - start_line + 1
+            print(f"[CTE 감지] {line_count} 라인의 CTE 구문을 하나의 청크로 유지합니다")
+            return [{
+                'type': f'{block_type}_CTE',
+                'startLine': start_line,
+                'endLine': end_line,
+                'text': full_text,
+                'description': f'{block_type} with CTE (lines {start_line}-{end_line}, {line_count} lines)'
+            }]
+        
+        # CTE가 아닌 경우 기존대로 분할
+        current_start = start_line
         while current_start <= end_line:
             current_end = min(current_start + MAX_LINES_PER_CHUNK - 1, end_line)
             chunks.append({
@@ -290,6 +324,32 @@ class PlpgsqlToOracleConverter:
             current_start = current_end + 1
         
         return chunks
+    
+    def contains_cte(self, text: str) -> bool:
+        """텍스트에 CTE (WITH 절) 구문이 포함되어 있는지 확인"""
+        import re
+        
+        # 대소문자 무관하게 WITH 절 패턴 찾기
+        # WITH ... AS (...) ... INSERT/SELECT/UPDATE/DELETE
+        text_upper = text.upper()
+        
+        # WITH 키워드가 있는지 확인
+        if 'WITH' not in text_upper:
+            return False
+        
+        # WITH ... INSERT/SELECT/UPDATE/DELETE 패턴 확인
+        # 주석이나 문자열 내부의 WITH는 제외하기 위해 간단한 체크
+        cte_pattern = r'\bWITH\s+\w+\s+AS\s*\('
+        if re.search(cte_pattern, text_upper):
+            # INSERT, SELECT, UPDATE, DELETE 중 하나가 WITH 이후에 있는지 확인
+            with_pos = text_upper.find('WITH')
+            after_with = text_upper[with_pos:]
+            
+            # CTE 다음에 DML 문이 있으면 진짜 CTE
+            if any(keyword in after_with for keyword in ['INSERT', 'SELECT', 'UPDATE', 'DELETE', 'MERGE']):
+                return True
+        
+        return False
     
     def call_llm(self, system_message: str, user_message: str, retry_count: int = 0) -> str:
         """LLM API 호출 (재시도 지원)"""
@@ -550,6 +610,11 @@ Oracle:
         
         # 청크 타입별 특별 지시
         type_specific_instruction = ""
+        
+        # CTE 포함 여부 체크
+        chunk_text = chunk.get('text', '')
+        is_cte_chunk = 'CTE' in chunk['type'] or self.contains_cte(chunk_text)
+        
         if chunk['type'] == 'SPEC':
             type_specific_instruction = """
 이 부분은 프로시저 헤더입니다.
@@ -562,32 +627,39 @@ Oracle:
 - DECLARE 키워드는 절대 포함하지 마세요
 - 변수 선언만 반환 (v_name TYPE; 형식)
 - 각 변수 선언 끝에 세미콜론 필요"""
-        elif 'BEGIN' in chunk['type'] or 'STATEMENTS' in chunk['type']:
-            type_specific_instruction = """
+        elif 'BEGIN' in chunk['type'] or 'STATEMENTS' in chunk['type'] or 'CTE' in chunk['type']:
+            if is_cte_chunk:
+                type_specific_instruction = """
+【🔥 CTE 구문 감지됨 - 최우선 변환 규칙 🔥】
+
+이 청크는 PostgreSQL WITH ... CTE 구문을 포함하고 있습니다.
+★★★ 필수: WITH 절을 완전히 제거하고 모든 CTE를 인라인 서브쿼리로 변환하세요! ★★★
+
+변환 방법:
+1. WITH 키워드 제거
+2. 각 CTE (WITH A AS (...), B AS (...))를 FROM 절의 서브쿼리로 변환
+3. CTE 별칭 유지 (예: ) MAT, ) CODE, ) P)
+4. ::varchar, ::numeric 등 타입캐스팅 제거
+5. date_part('day', date) → EXTRACT(DAY FROM date)
+6. CROSS JOIN params 제거하고 변수 직접 참조
+7. RIGHT JOIN → LEFT JOIN (테이블 순서 변경)
+
+예시:
+PostgreSQL:
+  WITH params AS (SELECT p_val::varchar AS val FROM dual),
+       result AS (SELECT * FROM table1 WHERE id = p_val)
+  INSERT INTO target SELECT * FROM result CROSS JOIN params
+
+Oracle:
+  INSERT INTO target 
+  SELECT * FROM (SELECT * FROM table1 WHERE id = p_val) result
+  -- params CTE 제거, p_val 직접 사용"""
+            else:
+                type_specific_instruction = """
 이 부분은 실행 블록입니다.
 - 각 SQL 문 끝에 세미콜론 필요
 - 블록 키워드(IF, LOOP, BEGIN 등) 뒤에는 세미콜론 불필요
-- END IF;, END LOOP;, END; 형식 준수
-
-★★★ CTE(WITH 절) 변환 시 특별 주의 ★★★
-
-【필수】 WITH 절은 완전히 제거하고 모든 CTE를 인라인 서브쿼리로 변환하세요!
-
-PostgreSQL:
-  WITH A AS (...), B AS (...) INSERT INTO ... SELECT ... FROM B LEFT JOIN A
-
-Oracle:
-  INSERT INTO ... SELECT ... FROM (...서브쿼리...) B LEFT JOIN (...서브쿼리...) A
-
-변환 체크리스트:
-1. ✓ WITH 키워드 제거
-2. ✓ 모든 CTE를 FROM 절 인라인 서브쿼리로 변환
-3. ✓ 별칭 유지 (예: ) MAT, ) CODE, ) P)
-4. ✓ ::varchar, ::numeric 타입캐스팅 제거
-5. ✓ date_part('field', date) → EXTRACT(FIELD FROM date)
-6. ✓ CROSS JOIN params 제거 (변수 직접 참조)
-7. ✓ RIGHT JOIN → LEFT JOIN (테이블 순서 변경)
-8. ✓ 상관 서브쿼리 활용: (SELECT col FROM tbl WHERE tbl.id = outer.id)"""
+- END IF;, END LOOP;, END; 형식 준수"""
         
         user_message = f"""다음 PostgreSQL PL/pgSQL 코드를 Oracle PL/SQL로 완벽하게 변환하세요.
 
