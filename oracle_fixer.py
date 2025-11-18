@@ -7,7 +7,6 @@ structure.json을 이용하여 큰 프로시저를 논리적 블록으로 나누
 
 import os
 import json
-import re
 import requests
 from pathlib import Path
 from typing import List, Dict, Any
@@ -30,17 +29,17 @@ LLM_URL = "https://your-llm-api-endpoint.com/v1/chat/completions"
 LLM_API_KEY = "your-api-key-here"
 LLM_MODEL = "gpt-4.1"
 
-# 프롬프트 언어 ('ko' 또는 'en')
-PROMPT_LANGUAGE = "ko"
-
 # 블록당 최대 라인 수 (이 값을 조정하여 LLM 요청 크기 조절)
 MAX_LINES_PER_CHUNK = 200
 
 # LLM 요청당 최대 문자 수 (이 값을 초과하면 청크를 더 작게 나눔)
 MAX_CHARS_PER_REQUEST = 50000
 
+# 주변 맥락 참고 라인 수 (청크 변환 시 이전/다음 청크에서 참고할 라인 수)
+CONTEXT_LINES = 15
+
 # API 요청 실패 시 재시도 횟수
-MAX_RETRIES = 2
+MAX_RETRIES = 3
 
 # ============================================================================
 # 메인 로직
@@ -308,8 +307,9 @@ class PlpgsqlToOracleConverter:
         }
         
         try:
-            print(f"    [API] 요청 전송 중... (메시지 길이: {len(user_message)} 문자)")
-            response = requests.post(LLM_URL, headers=headers, json=data, timeout=120)
+            retry_suffix = f" (재시도 {retry_count}/{MAX_RETRIES})" if retry_count > 0 else ""
+            print(f"    [API] 요청 전송 중...{retry_suffix} (메시지 길이: {len(user_message)} 문자)")
+            response = requests.post(LLM_URL, headers=headers, json=data, timeout=180)
             
             print(f"    [API] 응답 상태 코드: {response.status_code}")
             
@@ -317,6 +317,14 @@ class PlpgsqlToOracleConverter:
             if response.status_code != 200:
                 error_msg = f"HTTP {response.status_code}: {response.text[:500]}"
                 print(f"    [API 오류] {error_msg}")
+                
+                # 재시도 가능한 에러인 경우 재시도
+                if retry_count < MAX_RETRIES and response.status_code in [429, 500, 502, 503, 504]:
+                    print(f"    [API] {3 * (retry_count + 1)}초 후 재시도...")
+                    import time
+                    time.sleep(3 * (retry_count + 1))  # 지수 백오프
+                    return self.call_llm(system_message, user_message, retry_count + 1)
+                
                 return f"-- API ERROR: {error_msg}\n-- Original PostgreSQL Code:\n{user_message}"
             
             response.raise_for_status()
@@ -324,6 +332,14 @@ class PlpgsqlToOracleConverter:
             # 응답이 비어있는지 확인
             if not response.text:
                 print(f"    [API 오류] 응답 본문이 비어있습니다")
+                
+                # 재시도
+                if retry_count < MAX_RETRIES:
+                    print(f"    [API] 3초 후 재시도...")
+                    import time
+                    time.sleep(3)
+                    return self.call_llm(system_message, user_message, retry_count + 1)
+                
                 return f"-- API ERROR: Empty response\n-- Original PostgreSQL Code:\n{user_message}"
             
             # API는 text 문자열로 직접 변환된 Oracle SQL을 반환
@@ -331,10 +347,26 @@ class PlpgsqlToOracleConverter:
             return response.text.strip()
                 
         except requests.exceptions.Timeout:
-            print(f"    [API 오류] 타임아웃 (120초 초과)")
+            print(f"    [API 오류] 타임아웃 (180초 초과)")
+            
+            # 재시도
+            if retry_count < MAX_RETRIES:
+                print(f"    [API] 5초 후 재시도...")
+                import time
+                time.sleep(5)
+                return self.call_llm(system_message, user_message, retry_count + 1)
+            
             return f"-- TIMEOUT ERROR\n-- Original PostgreSQL Code:\n{user_message}"
         except requests.exceptions.RequestException as e:
             print(f"    [API 오류] 네트워크 오류: {e}")
+            
+            # 재시도
+            if retry_count < MAX_RETRIES:
+                print(f"    [API] 5초 후 재시도...")
+                import time
+                time.sleep(5)
+                return self.call_llm(system_message, user_message, retry_count + 1)
+            
             return f"-- NETWORK ERROR: {e}\n-- Original PostgreSQL Code:\n{user_message}"
         except Exception as e:
             print(f"    [API 오류] 예상치 못한 오류: {e}")
@@ -342,97 +374,141 @@ class PlpgsqlToOracleConverter:
             traceback.print_exc()
             return f"-- ERROR: {e}\n-- Original PostgreSQL Code:\n{user_message}"
     
-    def convert_chunk(self, chunk: Dict[str, Any], chunk_index: int, total_chunks: int) -> str:
-        """단일 청크를 Oracle로 변환"""
+    def convert_chunk(self, chunk: Dict[str, Any], chunk_index: int, total_chunks: int, 
+                     all_chunks: List[Dict[str, Any]] = None) -> str:
+        """단일 청크를 Oracle로 변환 (주변 맥락 포함)"""
         print(f"  [{chunk_index}/{total_chunks}] 변환 중: {chunk['description']} (lines {chunk['startLine']}-{chunk['endLine']})")
         
-        # 프롬프트 언어에 따라 메시지 선택
-        if PROMPT_LANGUAGE == "ko":
-            system_message = """당신은 PostgreSQL PL/pgSQL을 Oracle PL/SQL로 변환하는 전문 데이터베이스 개발자입니다.
+        # 주변 맥락 수집
+        prev_context = ""
+        next_context = ""
+        
+        if all_chunks:
+            # 이전 청크의 마지막 몇 줄
+            if chunk_index > 1:
+                prev_chunk = all_chunks[chunk_index - 2]
+                prev_lines = prev_chunk['text'].split('\n')
+                if len(prev_lines) > CONTEXT_LINES:
+                    prev_context = '\n'.join(prev_lines[-CONTEXT_LINES:])
+                else:
+                    prev_context = prev_chunk['text']
+            
+            # 다음 청크의 첫 몇 줄
+            if chunk_index < total_chunks:
+                next_chunk = all_chunks[chunk_index]
+                next_lines = next_chunk['text'].split('\n')
+                if len(next_lines) > CONTEXT_LINES:
+                    next_context = '\n'.join(next_lines[:CONTEXT_LINES])
+                else:
+                    next_context = next_chunk['text']
+        
+        # 시스템 메시지 구성
+        system_message = """당신은 PostgreSQL PL/pgSQL을 Oracle PL/SQL로 변환하는 전문 데이터베이스 개발자입니다.
 
-주요 변환 규칙:
-1. 프로시저 구문: CREATE OR REPLACE PROCEDURE 이름(...) IS (AS $procedure$가 아님)
-2. 저장 프로시저에서 DECLARE 키워드를 사용하지 마세요 - 변수 선언은 IS/AS 다음에 바로 작성
-3. 데이터 타입: varchar → VARCHAR2, datetime → DATE 또는 TIMESTAMP, text → CLOB
-4. 제어 구조: IF/LOOP/WHILE/FOR를 유지하되 Oracle 구문으로 변환
-5. 함수: EXTRACT() → 적절한 Oracle 함수, NOW() → SYSDATE, CURRENT_TIMESTAMP → SYSTIMESTAMP
-6. 임시 테이블: GLOBAL TEMPORARY TABLE 또는 컬렉션(nested tables/varrays) 사용
-7. RAISE INFO → DBMS_OUTPUT.PUT_LINE
-8. 커서: refcursor → SYS_REFCURSOR, cursor FOR loop 구문
-9. 문자열 연산: || (동일), SUBSTRING → SUBSTR, POSITION → INSTR
-10. 예외 블록: EXCEPTION WHEN ... THEN (유사하지만 Oracle 예외 이름 확인)
-11. $procedure$, $function$ 구분자 제거
-12. systimestamp는 Oracle에도 있지만 SYSTIMESTAMP (대문자 권장)
+완벽한 변환 규칙:
 
-중요: 저장 프로시저에서는 DECLARE 키워드를 포함하지 마세요. 변수는 IS/AS 바로 다음에 선언합니다.
+[구문 구조]
+1. 프로시저: CREATE OR REPLACE PROCEDURE 이름(...) IS
+2. 변수 선언: IS/AS 다음에 바로 작성 (DECLARE 키워드 절대 사용 금지)
+3. BEGIN-END 블록: 정확한 블록 구조 유지
 
-변환된 Oracle PL/SQL 코드만 반환하고 설명은 하지 마세요."""
+[데이터 타입]
+- varchar, character varying → VARCHAR2
+- text → CLOB
+- datetime, timestamp → DATE 또는 TIMESTAMP
+- serial, bigserial → NUMBER
+- boolean → NUMBER(1) 또는 BOOLEAN (Oracle 23c+)
+- integer, int → NUMBER 또는 INTEGER
 
-            # DECLARE 블록일 때 특별한 지시 추가
-            if chunk['type'] == 'DECLARE':
-                user_message = f"""다음은 저장 프로시저의 최상위 변수 선언부입니다.
-Oracle에서는 CREATE PROCEDURE ... IS 다음에 DECLARE 키워드 없이 바로 변수를 선언합니다.
+[함수 및 연산자]
+- NOW() → SYSDATE
+- CURRENT_TIMESTAMP → SYSTIMESTAMP
+- CURRENT_DATE → TRUNC(SYSDATE)
+- SUBSTRING(str, pos, len) → SUBSTR(str, pos, len)
+- POSITION(substr IN str) → INSTR(str, substr)
+- LENGTH() → LENGTH() (동일)
+- COALESCE() → NVL() 또는 COALESCE() (동일)
+- CONCAT() → || 연산자 사용
+- EXTRACT(field FROM timestamp) → EXTRACT(field FROM timestamp) (동일)
 
-다음 PostgreSQL 변수 선언을 Oracle로 변환하되, "declare" 또는 "DECLARE" 키워드는 절대 포함하지 마세요.
-변수 선언만 변환하여 반환하세요.
+[출력 및 로깅]
+- RAISE NOTICE → DBMS_OUTPUT.PUT_LINE
+- RAISE INFO → DBMS_OUTPUT.PUT_LINE
+- RAISE WARNING → DBMS_OUTPUT.PUT_LINE
+- RAISE EXCEPTION → RAISE_APPLICATION_ERROR(-20000, 'message')
 
-PostgreSQL 코드:
+[커서]
+- refcursor → SYS_REFCURSOR
+- FOR rec IN query LOOP → 동일 구문 사용 가능
+
+[트랜잭션]
+- COMMIT → COMMIT (동일, 하지만 프로시저 내 사용 주의)
+- ROLLBACK → ROLLBACK (동일)
+
+[제어 구조]
+- IF condition THEN ... ELSIF ... ELSE ... END IF; (동일)
+- LOOP ... END LOOP; (동일)
+- WHILE condition LOOP ... END LOOP; (동일)
+- FOR i IN 1..10 LOOP ... END LOOP; (동일)
+- EXIT WHEN condition; (동일)
+
+[구분자 제거]
+- $procedure$, $function$, $$, $body$ 등 모든 PostgreSQL 달러 구분자 제거
+
+[세미콜론 규칙]
+- SQL 문장 끝: 세미콜론 필수 (SELECT, INSERT, UPDATE, DELETE 등)
+- 변수 선언 끝: 세미콜론 필수
+- 제어 구조 키워드 뒤: 세미콜론 불필요 (IF, LOOP, BEGIN 등)
+- 블록 종료: END IF;, END LOOP;, END; 형식
+
+[중요 사항]
+- 이전/다음 청크의 맥락을 참고하여 변수 참조, 블록 구조 등을 올바르게 처리
+- 불완전한 문장의 경우 맥락을 보고 완성
+- 변환된 Oracle PL/SQL 코드만 반환 (설명, 주석, 마크다운 불필요)
+- 원본 코드의 들여쓰기와 가독성 유지"""
+
+        # 맥락 정보 구성
+        context_info = ""
+        if prev_context:
+            context_info += f"\n=== 이전 부분의 마지막 {CONTEXT_LINES}줄 (참고용) ===\n{prev_context}\n"
+        if next_context:
+            context_info += f"\n=== 다음 부분의 첫 {CONTEXT_LINES}줄 (참고용) ===\n{next_context}\n"
+        
+        # 청크 타입별 특별 지시
+        type_specific_instruction = ""
+        if chunk['type'] == 'SPEC':
+            type_specific_instruction = """
+이 부분은 프로시저 헤더입니다.
+- CREATE OR REPLACE PROCEDURE 형식으로 변환
+- 마지막에 IS 또는 AS로 끝나야 함
+- $procedure$, $$ 등의 PostgreSQL 구분자는 완전히 제거"""
+        elif chunk['type'] == 'DECLARE':
+            type_specific_instruction = """
+이 부분은 변수 선언부입니다.
+- DECLARE 키워드는 절대 포함하지 마세요
+- 변수 선언만 반환 (v_name TYPE; 형식)
+- 각 변수 선언 끝에 세미콜론 필요"""
+        elif 'BEGIN' in chunk['type'] or 'STATEMENTS' in chunk['type']:
+            type_specific_instruction = """
+이 부분은 실행 블록입니다.
+- 각 SQL 문 끝에 세미콜론 필요
+- 블록 키워드(IF, LOOP, BEGIN 등) 뒤에는 세미콜론 불필요
+- END IF;, END LOOP;, END; 형식 준수"""
+        
+        user_message = f"""다음 PostgreSQL PL/pgSQL 코드를 Oracle PL/SQL로 완벽하게 변환하세요.
+
+=== 현재 변환할 부분 정보 ===
+- 위치: 전체 {total_chunks}개 청크 중 {chunk_index}번째
+- 블록 타입: {chunk['type']}
+- 설명: {chunk['description']}
+{type_specific_instruction}
+
+{context_info}
+
+=== 변환할 PostgreSQL 코드 ===
 {chunk['text']}
 
-Oracle PL/SQL (DECLARE 키워드 없이 변수 선언만):"""
-            else:
-                user_message = f"""다음 PostgreSQL PL/pgSQL 코드를 Oracle PL/SQL로 변환하세요.
-이것은 전체 {total_chunks}개 중 {chunk_index}번째 부분입니다.
-블록 타입: {chunk['type']}
-설명: {chunk['description']}
-
-PostgreSQL 코드:
-{chunk['text']}
-
-Oracle PL/SQL:"""
-        else:
-            system_message = """You are an expert database developer specializing in converting PostgreSQL PL/pgSQL to Oracle PL/SQL.
-
-Key conversion rules:
-1. PROCEDURE syntax: CREATE OR REPLACE PROCEDURE name(...) IS (not AS $procedure$)
-2. DO NOT use DECLARE keyword in stored procedures - variable declarations go directly after IS/AS
-3. Data types: varchar → VARCHAR2, datetime → DATE or TIMESTAMP, text → CLOB
-4. Control structures: Keep IF/LOOP/WHILE/FOR but ensure proper Oracle syntax
-5. Functions: EXTRACT() → appropriate Oracle functions, NOW() → SYSDATE, CURRENT_TIMESTAMP → SYSTIMESTAMP
-6. Temporary tables: Use GLOBAL TEMPORARY TABLE or collections (nested tables/varrays)
-7. RAISE INFO → DBMS_OUTPUT.PUT_LINE
-8. Cursors: refcursor → SYS_REFCURSOR, cursor FOR loop syntax
-9. String operations: || (same), SUBSTRING → SUBSTR, POSITION → INSTR
-10. Exception blocks: EXCEPTION WHEN ... THEN (similar but check Oracle exception names)
-11. Remove $procedure$, $function$ delimiters
-12. systimestamp exists in Oracle, but use SYSTIMESTAMP (uppercase recommended)
-
-IMPORTANT: In stored procedures, do NOT include the DECLARE keyword. Variables are declared directly after IS/AS.
-
-Return ONLY the converted Oracle PL/SQL code without explanations."""
-
-            # DECLARE block needs special instruction
-            if chunk['type'] == 'DECLARE':
-                user_message = f"""This is the top-level variable declaration section of a stored procedure.
-In Oracle, variables are declared directly after CREATE PROCEDURE ... IS without the DECLARE keyword.
-
-Convert the following PostgreSQL variable declarations to Oracle, but do NOT include "declare" or "DECLARE" keyword.
-Return only the variable declarations.
-
-PostgreSQL Code:
-{chunk['text']}
-
-Oracle PL/SQL (variable declarations only, without DECLARE keyword):"""
-            else:
-                user_message = f"""Convert the following PostgreSQL PL/pgSQL code segment to Oracle PL/SQL.
-This is part {chunk_index} of {total_chunks} in a larger procedure.
-Block type: {chunk['type']}
-Description: {chunk['description']}
-
-PostgreSQL Code:
-{chunk['text']}
-
-Oracle PL/SQL:"""
+=== 변환 결과 (Oracle PL/SQL만 반환) ==="""
 
         # 요청 크기가 너무 크면 청크를 더 작게 나눔
         total_message_size = len(system_message) + len(user_message)
@@ -462,10 +538,10 @@ Oracle PL/SQL:"""
             }
             
             # 재귀적으로 각 절반 변환
-            result1 = self.convert_chunk(chunk1, chunk_index, total_chunks)
-            result2 = self.convert_chunk(chunk2, chunk_index, total_chunks)
+            result1 = self.convert_chunk(chunk1, chunk_index, total_chunks, all_chunks)
+            result2 = self.convert_chunk(chunk2, chunk_index, total_chunks, all_chunks)
             
-            return f"{result1}\n\n-- Part 2 continues...\n{result2}"
+            return f"{result1}\n\n{result2}"
 
         return self.call_llm(system_message, user_message)
     
@@ -476,54 +552,67 @@ Oracle PL/SQL:"""
         result.append("-- ============================================================================")
         result.append("-- Converted from PostgreSQL PL/pgSQL to Oracle PL/SQL")
         result.append("-- Original file: " + str(self.sql_file.name))
-        result.append("-- Conversion date: " + str(Path.cwd()))
+        from datetime import datetime
+        result.append("-- Conversion date: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        result.append("-- Total chunks: " + str(len(converted_chunks)))
         result.append("-- ============================================================================")
         result.append("")
         
-        # SPEC 부분 (CREATE PROCEDURE ... IS/AS 까지)
+        # SPEC 부분 (프로시저 헤더)
         spec_chunks = [c for c in converted_chunks if c['original_type'] == 'SPEC']
         if spec_chunks:
-            spec_text = spec_chunks[0]['converted_text']
-            # AS $procedure$ 같은 PostgreSQL 구문 제거
-            spec_text = spec_text.replace('$procedure$', '').replace('AS $$', '')
-            # 마지막에 IS 또는 AS가 없으면 추가
-            spec_text = spec_text.strip()
-            if not spec_text.upper().endswith(' IS') and not spec_text.upper().endswith(' AS'):
-                spec_text += '\nIS'
-            result.append(spec_text)
-            result.append("")
+            spec_text = spec_chunks[0]['converted_text'].strip()
+            if spec_text:
+                result.append(spec_text)
+                result.append("")
+        else:
+            print("[경고] SPEC 청크가 없습니다. 프로시저 헤더가 누락될 수 있습니다.")
         
-        # DECLARE 부분 (Oracle은 DECLARE 키워드 없이 변수만 선언)
+        # DECLARE 부분 (변수 선언)
         declare_chunks = [c for c in converted_chunks if c['original_type'] == 'DECLARE']
         if declare_chunks:
-            declare_text = declare_chunks[0]['converted_text']
-            original_text = declare_text
-            
-            # "DECLARE" 키워드 제거 (대소문자 무관) - 백업 안전장치
-            # LLM이 제대로 변환했다면 이미 DECLARE가 없어야 함
-            declare_text = re.sub(r'^\s*declare\s*$', '', declare_text, flags=re.IGNORECASE | re.MULTILINE)
-            declare_text = re.sub(r'^\s*DECLARE\s*$', '', declare_text, flags=re.MULTILINE)
-            declare_text = declare_text.strip()
-            
-            # DECLARE가 제거되었다면 경고 (LLM이 제대로 변환 안 한 것)
-            if original_text != declare_text and 'DECLARE' in original_text.upper():
-                print("[경고] DECLARE 키워드가 LLM 응답에 포함되어 있어서 제거했습니다.")
-                print("       LLM 프롬프트를 개선하거나 모델을 변경하는 것을 권장합니다.")
-            
+            declare_text = declare_chunks[0]['converted_text'].strip()
             if declare_text:
                 result.append(declare_text)
                 result.append("")
         
-        # BEGIN 부분 및 기타
+        # BEGIN 블록 시작
         begin_chunks = [c for c in converted_chunks if c['original_type'] not in ['SPEC', 'DECLARE']]
         if begin_chunks:
-            for chunk in begin_chunks:
+            # 첫 번째 BEGIN 청크가 BEGIN 키워드로 시작하는지 확인
+            first_chunk_text = begin_chunks[0]['converted_text'].strip()
+            has_begin = first_chunk_text.upper().startswith('BEGIN')
+            
+            if not has_begin:
+                result.append("BEGIN")
+                result.append("")
+            
+            # 모든 BEGIN 블록 추가
+            for i, chunk in enumerate(begin_chunks):
                 chunk_text = chunk['converted_text'].strip()
                 if chunk_text:
+                    # 에러 메시지가 포함된 경우 경고
+                    if chunk_text.startswith('-- API ERROR') or chunk_text.startswith('-- TIMEOUT ERROR'):
+                        print(f"[경고] 청크 {i+1}에서 변환 오류가 발생했습니다: {chunk['description']}")
+                    
                     result.append(chunk_text)
                     result.append("")
+            
+            # 마지막 청크가 END로 끝나는지 확인
+            last_chunk_text = begin_chunks[-1]['converted_text'].strip()
+            has_end = any(last_chunk_text.upper().endswith(ending) for ending in ['END;', 'END LOOP;', 'END IF;'])
+            
+            if not has_end and not last_chunk_text.upper().endswith('END'):
+                result.append("END;")
+                result.append("")
+        else:
+            # BEGIN 블록이 없으면 최소한의 구조 생성
+            result.append("BEGIN")
+            result.append("  NULL;")
+            result.append("END;")
+            result.append("")
         
-        # 마지막에 END 프로시저명; 추가
+        # Oracle SQL*Plus 실행 명령어
         result.append("/")
         result.append("")
         
@@ -558,27 +647,43 @@ Oracle PL/SQL:"""
             print(f"      미리보기: {text_preview}...")
         print()
         
-        # 2단계: 각 청크를 LLM으로 변환
-        print("2단계: 각 청크를 Oracle로 변환...")
+        # 2단계: 각 청크를 LLM으로 변환 (주변 맥락 포함)
+        print("2단계: 각 청크를 Oracle로 변환 (주변 맥락 참고)...")
         converted_chunks = []
         
+        import time
+        start_time = time.time()
+        
         for i, chunk in enumerate(chunks, 1):
-            converted_text = self.convert_chunk(chunk, i, len(chunks))
+            chunk_start = time.time()
+            converted_text = self.convert_chunk(chunk, i, len(chunks), all_chunks=chunks)
+            chunk_elapsed = time.time() - chunk_start
+            
             converted_chunks.append({
                 'original_type': chunk['type'],
                 'original_lines': (chunk['startLine'], chunk['endLine']),
                 'description': chunk['description'],
                 'converted_text': converted_text
             })
+            
+            # 진행 상황 표시
+            elapsed = time.time() - start_time
+            avg_time = elapsed / i
+            remaining = avg_time * (len(chunks) - i)
+            
+            print(f"  진행: {i}/{len(chunks)} ({i*100//len(chunks)}%) | "
+                  f"경과: {elapsed:.1f}초 | "
+                  f"예상 남은 시간: {remaining:.1f}초")
         
-        print(f"✓ 모든 청크 변환 완료\n")
+        total_elapsed = time.time() - start_time
+        print(f"✓ 모든 청크 변환 완료 (총 소요 시간: {total_elapsed:.1f}초)\n")
         
         # 3단계: 재조립
         print("3단계: 변환된 청크를 하나의 프로시저로 재조립...")
         final_oracle_sql = self.reassemble_procedure(converted_chunks)
         print("✓ 재조립 완료\n")
         
-        # 4단계: 저장
+        # 4단계: 결과 저장
         print("4단계: 결과 저장...")
         output_file = self.output_dir / f"{self.sql_file.stem}_oracle.sql"
         with open(output_file, 'w', encoding='utf-8') as f:
@@ -591,8 +696,31 @@ Oracle PL/SQL:"""
             json.dump(converted_chunks, f, indent=2, ensure_ascii=False)
         print(f"✓ 디버그 파일 저장: {debug_file}\n")
         
+        # 5단계: 변환 통계 출력
         print("="*80)
-        print("변환 완료!")
+        print("변환 완료 요약")
+        print("="*80)
+        print(f"원본 파일: {self.sql_file.name}")
+        print(f"총 라인 수: {len(self.sql_lines):,} 라인")
+        print(f"총 청크 수: {len(chunks)} 개")
+        
+        # 에러 청크 카운트
+        error_chunks = [c for c in converted_chunks 
+                       if '-- API ERROR' in c['converted_text'] 
+                       or '-- TIMEOUT ERROR' in c['converted_text']
+                       or '-- NETWORK ERROR' in c['converted_text']]
+        
+        if error_chunks:
+            print(f"⚠️  변환 실패 청크: {len(error_chunks)} 개")
+            print("   다음 청크에서 오류가 발생했습니다:")
+            for err_chunk in error_chunks:
+                print(f"   - {err_chunk['description']} (라인 {err_chunk['original_lines'][0]}-{err_chunk['original_lines'][1]})")
+        else:
+            print(f"✓ 모든 청크 변환 성공!")
+        
+        print(f"\n출력 파일: {output_file}")
+        print(f"파일 크기: {output_file.stat().st_size:,} bytes")
+        print(f"변환 소요 시간: {total_elapsed:.1f}초")
         print("="*80)
         
         return output_file
@@ -614,6 +742,8 @@ def main():
     print(f"  Structure 파일: {STRUCTURE_FILE_NAME}")
     print(f"  LLM 모델: {LLM_MODEL}")
     print(f"  청크당 최대 라인: {MAX_LINES_PER_CHUNK}")
+    print(f"  맥락 참고 라인: {CONTEXT_LINES}")
+    print(f"  API 재시도 횟수: {MAX_RETRIES}")
     print()
     
     # 변환 실행
