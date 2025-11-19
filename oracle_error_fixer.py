@@ -179,29 +179,26 @@ class OracleErrorFixer:
         error_info = self.format_error_info(errors)
         
         system_message = """당신은 Oracle Database 19c PL/SQL 전문가입니다.
-당신의 임무는 컴파일 에러가 있는 코드를 분석하고 수정 방안을 JSON 형식으로 제공하는 것입니다.
+당신의 임무는 컴파일 에러를 수정하되, 코드의 실행 결과가 변하지 않도록 하는 것입니다.
 
-중요 규칙:
-1. 제공된 에러 로그와 해당 라인의 코드를 분석합니다.
-2. Oracle 19c 문법을 준수하여 수정 방안을 제시합니다.
-3. 원본 로직을 최대한 유지하면서 수정합니다.
-4. 응답은 반드시 다음 JSON 형식으로만 제공하세요:
+핵심 원칙:
+수정 전과 후의 코드가 동일한 비즈니스 로직을 수행해야 합니다.
+데이터 조회/저장/계산 결과가 달라져서는 안됩니다.
 
+응답 형식 (순수 JSON만):
 {
   "fixes": [
     {
       "start_line": 시작_라인번호,
       "end_line": 종료_라인번호,
-      "original": "원본 코드 (여러줄 가능)",
-      "fixed": "수정된 코드 (여러줄 가능)",
+      "original": "원본 코드",
+      "fixed": "수정된 코드",
       "reason": "수정 이유"
     }
   ]
 }
 
-5. start_line과 end_line을 명확히 지정하세요 (단일 라인이면 같은 번호).
-6. original과 fixed는 정확히 해당 라인 범위의 전체 코드를 포함해야 합니다.
-7. 설명이나 마크다운 블록 없이 순수 JSON만 반환하세요."""
+주의: start_line과 end_line을 정확히 지정하고, original에는 해당 범위의 원본 코드 전체를 포함하세요."""
 
         user_message = f"""다음은 컴파일 에러가 발생한 Oracle PL/SQL 코드입니다.
 
@@ -211,7 +208,8 @@ class OracleErrorFixer:
 
 {error_contexts}
 
-위 에러들을 분석하고, 각 에러에 대한 수정 방안을 JSON 형식으로 제공해주세요."""
+위 에러들을 수정하되, 코드의 실행 결과는 동일하게 유지해야 합니다.
+각 에러에 대한 수정 방안을 JSON 형식으로 제공해주세요."""
 
         return system_message, user_message
     
