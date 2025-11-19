@@ -190,16 +190,18 @@ class OracleErrorFixer:
 {
   "fixes": [
     {
-      "line": 라인번호,
-      "original": "원본 코드",
-      "fixed": "수정된 코드",
+      "start_line": 시작_라인번호,
+      "end_line": 종료_라인번호,
+      "original": "원본 코드 (여러줄 가능)",
+      "fixed": "수정된 코드 (여러줄 가능)",
       "reason": "수정 이유"
     }
   ]
 }
 
-5. 설명이나 마크다운 블록 없이 순수 JSON만 반환하세요.
-6. 각 에러에 대해 정확한 라인 번호와 수정된 코드를 제공하세요."""
+5. start_line과 end_line을 명확히 지정하세요 (단일 라인이면 같은 번호).
+6. original과 fixed는 정확히 해당 라인 범위의 전체 코드를 포함해야 합니다.
+7. 설명이나 마크다운 블록 없이 순수 JSON만 반환하세요."""
 
         user_message = f"""다음은 컴파일 에러가 발생한 Oracle PL/SQL 코드입니다.
 
@@ -326,44 +328,84 @@ class OracleErrorFixer:
         """LLM이 제안한 수정 사항을 원본 SQL에 적용합니다."""
         sql_lines = sql_content.split('\n')
         
-        # 라인 번호 역순으로 정렬 (뒤에서부터 수정하면 앞쪽 라인 번호가 변하지 않음)
-        sorted_fixes = sorted(fixes, key=lambda x: x.get('line', 0), reverse=True)
+        # 시작 라인 번호 역순으로 정렬 (뒤에서부터 수정하면 앞쪽 라인 번호가 변하지 않음)
+        sorted_fixes = sorted(fixes, key=lambda x: x.get('start_line', x.get('line', 0)), reverse=True)
         
         applied_count = 0
         for fix in sorted_fixes:
-            line_num = fix.get('line')
+            # 새 형식 (start_line, end_line) 또는 구 형식 (line) 지원
+            start_line = fix.get('start_line', fix.get('line'))
+            end_line = fix.get('end_line', fix.get('line'))
             original = fix.get('original', '').strip()
             fixed = fix.get('fixed', '')
             reason = fix.get('reason', '')
             
-            if not line_num or line_num < 1 or line_num > len(sql_lines):
-                print(f"   ⚠ 잘못된 라인 번호: {line_num}")
+            if not start_line or start_line < 1 or start_line > len(sql_lines):
+                print(f"   ⚠ 잘못된 시작 라인 번호: {start_line}")
+                continue
+            
+            if not end_line or end_line < start_line or end_line > len(sql_lines):
+                print(f"   ⚠ 잘못된 종료 라인 번호: {end_line}")
                 continue
             
             # 라인 인덱스 (0-based)
-            idx = line_num - 1
-            current_line = sql_lines[idx].strip()
+            start_idx = start_line - 1
+            end_idx = end_line - 1
             
-            # 원본 코드가 일치하는지 확인
-            if original and original not in sql_lines[idx]:
-                print(f"   ⚠ Line {line_num}: 원본 코드 불일치")
-                print(f"     기대: {original[:50]}")
-                print(f"     실제: {sql_lines[idx][:50]}")
-                # 유사도가 높으면 적용 시도
-                if self.similar_enough(current_line, original):
-                    print(f"     유사도가 높아 적용 시도")
-                else:
-                    continue
+            # 원본 코드 추출
+            original_lines = sql_lines[start_idx:end_idx+1]
+            original_text = '\n'.join([line.strip() for line in original_lines])
+            
+            # 원본 코드가 일치하는지 확인 (부분 매칭 허용)
+            if original:
+                original_normalized = ''.join(original.split()).upper()
+                current_normalized = ''.join(original_text.split()).upper()
+                
+                if original_normalized not in current_normalized and current_normalized not in original_normalized:
+                    print(f"   ⚠ Line {start_line}-{end_line}: 원본 코드 불일치")
+                    print(f"     기대: {original[:50]}")
+                    print(f"     실제: {original_text[:50]}")
+                    
+                    # 유사도 확인
+                    similarity = self.calculate_similarity(original_normalized, current_normalized)
+                    if similarity < 0.6:
+                        print(f"     유사도 너무 낮음 ({similarity:.1%}), 스킵")
+                        continue
+                    else:
+                        print(f"     유사도 {similarity:.1%}, 적용 시도")
             
             # 들여쓰기 유지
-            indent = len(sql_lines[idx]) - len(sql_lines[idx].lstrip())
-            sql_lines[idx] = ' ' * indent + fixed
+            indent = len(sql_lines[start_idx]) - len(sql_lines[start_idx].lstrip())
             
+            # fixed 코드를 줄 단위로 분리
+            if '\n' in fixed:
+                fixed_lines = [' ' * indent + line.lstrip() for line in fixed.split('\n')]
+            else:
+                fixed_lines = [' ' * indent + fixed.lstrip()]
+            
+            # 원본 라인 범위 삭제하고 새 라인 삽입
+            del sql_lines[start_idx:end_idx+1]
+            for i, line in enumerate(fixed_lines):
+                sql_lines.insert(start_idx + i, line)
+            
+            line_range = f"{start_line}-{end_line}" if start_line != end_line else str(start_line)
+            print(f"   ✓ Line {line_range} 수정 완료: {reason[:50]}")
             applied_count += 1
-            print(f"   ✓ Line {line_num} 수정 완료: {reason[:50]}")
         
         print(f"   총 {applied_count}/{len(fixes)}개 수정 적용")
         return '\n'.join(sql_lines)
+    
+    def calculate_similarity(self, str1: str, str2: str) -> float:
+        """두 문자열의 유사도를 계산합니다 (0.0 ~ 1.0)."""
+        if not str1 or not str2:
+            return 0.0
+        
+        # 짧은 문자열 기준으로 매칭 문자 수 계산
+        shorter = min(len(str1), len(str2))
+        longer = max(len(str1), len(str2))
+        
+        matches = sum(c1 == c2 for c1, c2 in zip(str1, str2))
+        return matches / longer if longer > 0 else 0.0
     
     def similar_enough(self, str1: str, str2: str) -> bool:
         """두 문자열이 충분히 유사한지 확인합니다."""
