@@ -13,7 +13,7 @@ from typing import Dict, List, Tuple
 # 여기에서 필요한 정보를 입력하세요
 
 # 입력 폴더 경로 (SQL 파일과 JSON 에러 로그가 있는 폴더)
-INPUT_FOLDER = r"C:\Users\sh\Desktop\uengine_source\githubs\plsql-parser\error_logs"
+INPUT_FOLDER = r"data"
 
 # LLM API 설정
 LLM_API_URL = "https://your-company-api.com/v1/chat/completions"
@@ -248,14 +248,11 @@ class OracleErrorFixer:
                 
                 response.raise_for_status()
                 
-                result = response.json()
+                # API 응답을 텍스트로 받음
+                llm_response = response.text
                 
-                # 응답에서 수정 방안 추출
-                if 'choices' in result and len(result['choices']) > 0:
-                    llm_response = result['choices'][0]['message']['content']
-                    return self.parse_llm_fixes(llm_response)
-                else:
-                    print(f"✗ LLM 응답 형식 오류: {result}")
+                # JSON 형식으로 파싱 시도
+                return self.parse_llm_fixes(llm_response)
                     
             except requests.exceptions.Timeout:
                 print(f"   ⚠ 타임아웃 발생 (시도 {attempt + 1}/{MAX_RETRIES})")
@@ -267,21 +264,62 @@ class OracleErrorFixer:
         raise Exception("LLM API 호출 실패: 최대 재시도 횟수 초과")
     
     def parse_llm_fixes(self, response: str) -> Dict:
-        """LLM 응답에서 JSON을 파싱합니다."""
-        # 마크다운 블록 제거
+        """LLM 응답 문자열에서 JSON을 추출하고 파싱합니다."""
+        original_response = response
+        
+        # 1. 마크다운 코드 블록 제거
         if "```json" in response:
-            response = response.split("```json")[1].split("```")[0]
+            # ```json 과 ``` 사이의 내용 추출
+            try:
+                response = response.split("```json", 1)[1].split("```", 1)[0]
+            except IndexError:
+                pass
         elif "```" in response:
-            response = response.split("```")[1].split("```")[0]
+            # ``` 와 ``` 사이의 내용 추출
+            try:
+                response = response.split("```", 1)[1].split("```", 1)[0]
+            except IndexError:
+                pass
         
         response = response.strip()
         
+        # 2. JSON 파싱 시도
         try:
             fixes_data = json.loads(response)
-            return fixes_data
+            
+            # fixes 키가 있는지 확인
+            if 'fixes' in fixes_data:
+                return fixes_data
+            else:
+                print(f"   ⚠ JSON에 'fixes' 키가 없습니다. 키 목록: {list(fixes_data.keys())}")
+                return {"fixes": []}
+                
         except json.JSONDecodeError as e:
-            print(f"✗ JSON 파싱 실패: {e}")
-            print(f"응답 내용: {response[:500]}")
+            print(f"   ✗ JSON 파싱 실패: {e}")
+            print(f"   응답 앞부분 (500자): {response[:500]}")
+            print(f"   전체 응답 길이: {len(original_response)}자")
+            
+            # 3. JSON 객체를 찾아서 추출 시도 (마지막 수단)
+            try:
+                # { 로 시작하는 부분 찾기
+                start = response.find('{')
+                if start != -1:
+                    # 매칭되는 } 찾기
+                    bracket_count = 0
+                    for i in range(start, len(response)):
+                        if response[i] == '{':
+                            bracket_count += 1
+                        elif response[i] == '}':
+                            bracket_count -= 1
+                            if bracket_count == 0:
+                                json_str = response[start:i+1]
+                                fixes_data = json.loads(json_str)
+                                if 'fixes' in fixes_data:
+                                    return fixes_data
+                print(f"   ✗ JSON 추출 실패")
+            except (json.JSONDecodeError, KeyError, IndexError):
+                pass
+            
             return {"fixes": []}
     
     def apply_fixes(self, sql_content: str, fixes: List[Dict]) -> str:
