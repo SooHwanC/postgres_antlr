@@ -168,14 +168,34 @@ def analyze_and_chunk(sql_lines, ast_data):
 
 전체 라인 수: {len(sql_lines)}
 
+AST에는 다음 타입들이 있습니다:
+ASSIGNMENT, BEGIN, CALL, CREATE_TEMP_TABLE, CTE, CURSOR, DECLARE, DELETE, DROP_TABLE, ELSE, ELSEIF, EXCEPTION, FETCH, FILE, IF, INSERT, NOTICE, PROCEDURE, SELECT, SPEC, UPDATE, WHILE
+
 이 프로시저를 Oracle로 변환하기 위해 적절한 청크로 분할하려고 합니다.
 
-**중요 규칙**:
-1. CTE (type이 "CTE"인 노드)는 라인 수와 관계없이 절대로 분할하지 말 것
-2. SELECT, INSERT, UPDATE, DELETE 같은 완전한 쿼리 블록은 분할하지 말 것
-3. 일반 섹션은 가능하면 {MAX_CHUNK_LINES} 라인 이하로 분할
-4. 하지만 논리적으로 완전한 단위를 유지하는 것이 최우선
-5. AST의 type 필드를 기준으로 논리적 경계를 판단할 것
+**분할 규칙 (매우 중요)**:
+
+1. **절대 분할 금지 타입** (라인 수와 무관하게 통째로 유지):
+   - CTE (WITH 절은 절대 분할 불가)
+   - SELECT, INSERT, UPDATE, DELETE (완전한 쿼리 블록)
+   - CREATE_TEMP_TABLE, DROP_TABLE
+   - CURSOR (커서 전체)
+   - WHILE (루프 전체)
+
+2. **분할 가능 타입** (500 라인 초과 시 children을 보고 세분화):
+   - BEGIN (여러 구문을 포함하는 블록)
+   - IF / ELSEIF / ELSE (조건문 블록)
+   - EXCEPTION (예외 처리 블록)
+   - DECLARE (변수 선언부가 너무 길면 분할 가능)
+
+3. **일반 기준**:
+   - 일반 섹션은 가능하면 {MAX_CHUNK_LINES} 라인 이하로 분할
+   - 하지만 논리적으로 완전한 단위를 유지하는 것이 최우선
+   - BEGIN, IF 같은 블록이 500 라인을 넘으면 반드시 children을 확인하여 더 세분화할 것
+
+4. **BEGIN 블록 처리**:
+   - BEGIN 블록이 500 라인 초과하면 children을 순회하며 논리적 단위로 분할
+   - 예: BEGIN 내부에 SELECT, INSERT, IF 등이 있으면 각각을 별도 청크로
 
 **출력 형식** (반드시 JSON만 출력, 다른 텍스트 없이):
 {{
@@ -191,8 +211,7 @@ def analyze_and_chunk(sql_lines, ast_data):
       "size_lines": 50,
       "priority": "HIGH",
       "description": "이 섹션 설명",
-      "conversion_notes": "변환 시 주의사항",
-      "is_cte": false
+      "conversion_notes": "변환 시 주의사항"
     }}
   ]
 }}
@@ -221,13 +240,25 @@ def analyze_and_chunk(sql_lines, ast_data):
         # 청크 크기 검증 및 경고
         print(f"[INFO] 분석 완료: {len(analysis['chunks'])}개 청크로 분할")
         
+        has_large_chunks = False
         for chunk in analysis['chunks']:
             size = chunk['size_lines']
             if size > WARN_CHUNK_LINES:
+                has_large_chunks = True
                 print(f"[WARNING] 청크 {chunk['chunk_id']} '{chunk['name']}'의 크기가 {size} 라인으로 권장 크기({WARN_CHUNK_LINES})를 초과합니다.")
                 print(f"          AST Type: {chunk['ast_type']}, Lines: {chunk['start_line']}-{chunk['end_line']}")
-                if chunk.get('is_cte', False):
-                    print(f"          [INFO] CTE 블록이므로 분할하지 않음")
+                
+                # 분할 불가 타입인지 확인
+                no_split_types = ['CTE', 'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE_TEMP_TABLE', 'DROP_TABLE', 'CURSOR', 'WHILE']
+                if chunk['ast_type'] in no_split_types:
+                    print(f"          [INFO] {chunk['ast_type']} 타입은 분할 불가 - 통째로 처리")
+                else:
+                    print(f"          [WARNING] {chunk['ast_type']} 타입은 분할 가능 - 더 세분화 권장")
+        
+        if has_large_chunks:
+            print("\n[WARNING] 500 라인을 초과하는 청크가 있습니다.")
+            print("          변환 품질이나 성능에 문제가 발생할 수 있습니다.")
+            print("          특히 BEGIN, IF 블록은 더 세분화하는 것을 권장합니다.\n")
         
         # 로그 저장
         save_log("analysis_result.json", analysis)
@@ -278,6 +309,7 @@ PostgreSQL 프로시저의 일부를 Oracle 19c로 변환해주세요.
    - now() -> SYSDATE
    - string_agg() -> LISTAGG()
    - array_agg() -> LISTAGG() 또는 COLLECT()
+   - date_trunc() -> TRUNC()
 
 2. 타입 변환:
    - VARCHAR -> VARCHAR2
@@ -285,6 +317,7 @@ PostgreSQL 프로시저의 일부를 Oracle 19c로 변환해주세요.
    - NUMERIC(n,m) -> NUMBER(n,m)
    - BOOLEAN -> NUMBER(1)
    - TIMESTAMP -> TIMESTAMP (동일하나 SYSTIMESTAMP 사용)
+   - refcursor -> SYS_REFCURSOR
 
 3. 구조 변환:
    - CREATE OR REPLACE FUNCTION -> CREATE OR REPLACE PROCEDURE (RETURNS void인 경우)
@@ -293,12 +326,15 @@ PostgreSQL 프로시저의 일부를 Oracle 19c로 변환해주세요.
    - $$ ... $$ -> BEGIN ... END;
    - PERFORM -> SELECT INTO 변수 FROM dual
    - RAISE NOTICE -> DBMS_OUTPUT.PUT_LINE
-   - refcursor -> SYS_REFCURSOR
+   - CREATE TEMP TABLE -> CREATE GLOBAL TEMPORARY TABLE (사전 생성 필요, 여기선 TRUNCATE 사용)
+   - DROP TABLE IF EXISTS -> BEGIN EXECUTE IMMEDIATE 'DROP TABLE...'; EXCEPTION WHEN OTHERS THEN NULL; END;
 
 4. 기타:
    - || (연결 연산자) -> || (동일)
    - LIMIT -> ROWNUM 또는 FETCH FIRST
    - OFFSET -> ROW_NUMBER() OVER()
+   - FOR ... IN ... LOOP -> FOR ... IN ... LOOP (동일)
+   - EXIT WHEN -> EXIT WHEN (동일)
 
 **변환할 PostgreSQL 코드**:
 ```sql
@@ -312,6 +348,7 @@ PostgreSQL 프로시저의 일부를 Oracle 19c로 변환해주세요.
 4. 원본의 모든 로직을 빠짐없이 변환하세요
 5. 주석으로 주요 변경사항을 표시할 수 있습니다
 6. 한 글자도 생략하거나 축약하지 마세요
+7. 원본 코드의 모든 라인을 반드시 변환하세요
 """
 
     response = call_llm(prompt)
