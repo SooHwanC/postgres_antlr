@@ -1,240 +1,504 @@
-INSERT INTO posplot.tb_t18_molt088 (
-    day_cd, comm_apply_month, works_code, process_code, component_item_number,
-    category_segment1, category_segment2, category_segment3, category_segment4, 
-    item_product_code_n, steel_grd_group, item_brn_cd,
-    im_std_rmat_usg_cca, ir_che_prod_use_qt, rmat_std_ut_csum2, 
-    unit_price, item_cst_nor_amt, rmat_stk_dt, actual_type, seq
-)
-WITH
-params AS (
-    SELECT
-        TO_CHAR(p_month_cd) AS pr_month_cd,
-        TO_CHAR(v_STOCK_MONTH) AS pr_stock_month,
-        TO_CHAR(p_works_code) AS pr_works_code,
-        EXTRACT(DAY FROM LAST_DAY(TO_DATE(v_STOCK_MONTH, 'YYYYMM'))) AS days_in_month
-    FROM DUAL
-),
-B_usage AS (
-    SELECT
-        x.works_code,
-        x.item_brn_cd,
-        x.slab_mat_fac_tp AS resource_code,
-        x.item_product_code_n,
-        x.steel_grd_group,
-        x.category_segment3,
-        x.category_segment4,
-        SUM(x.ir_che_prod_use_qt) / MAX(y.total_work_day) AS day_qty
-    FROM posplot.tb_t18_molt082 x
-    INNER JOIN v_TEMP_WORK_DAY y
-        ON x.works_code = y.works_code
-        AND x.day_cd = y.day_cd
-        AND x.process_code = y.process_code
-        AND x.slab_mat_fac_tp = y.slab_mat_fac_tp
-        AND x.item_product_code_n = y.item_product_code_n
-        AND x.steel_grd_group = y.steel_grd_group
-    WHERE x.data_type = 'M'
-        AND x.process_code = 'CC'
-        AND x.category_segment4 LIKE 'C%'
-        AND SUBSTR(x.category_segment4, 1, 3) NOT IN ('C04', 'C06')
-        AND x.category_segment4 <> 'C0111'
-    GROUP BY 
-        x.works_code, x.category_segment3, x.category_segment4,
-        x.slab_mat_fac_tp, x.item_product_code_n, x.steel_grd_group, x.item_brn_cd
-),
-molt101 AS (
-    SELECT 
-        month_cd,
-        stock_month,
-        works_code,
-        item,
-        pred_flag,
-        total_stock_unit_price
-    FROM posplot.tb_t18_molt101
-    WHERE month_cd = p_month_cd
-        AND stock_month = v_STOCK_MONTH
-        AND works_code = p_works_code
-),
-A_price_base AS (
-    SELECT
-        a.seq,
-        a.month_cd,
-        a.works_code,
-        a.comm_apply_month,
-        a.ir_brand_cd,
-        NVL(b.total_stock_unit_price, a.im_ccon_rmat_iss_upri) AS im_ccon_rmat_iss_upri,
-        a.actual_type
-    FROM posplot.tb_t18_molt100 a
-    LEFT JOIN molt101 b
-        ON a.month_cd = b.month_cd
-        AND a.comm_apply_month = b.stock_month
-        AND a.works_code = b.works_code
-        AND a.ir_brand_cd = b.item
-        AND a.actual_type = b.pred_flag
-    WHERE a.month_cd = p_month_cd
-        AND a.works_code = p_works_code
-        AND a.comm_apply_month = v_STOCK_MONTH
-        AND a.actual_type = 'R'
-),
-Special_brand_price AS (
-    SELECT 
-        DECODE(process_code, 'BF', 'EF2A0001', 'FN', 'EF2A0003') AS item_brn_cd,
-        item_cst_nor_amt / 1000 AS sp_price
-    FROM posplot.tb_t18_molt070
-    WHERE day_cd = p_month_cd
-        AND comm_apply_month = v_STOCK_MONTH
-        AND works_code = p_works_code
-        AND process_code IN ('BF', 'FN')
-        AND component_item_number = 'ALL'
-        AND category_segment4 = 'B0101'
-        AND actual_type = 'R'
-),
-A AS (
-    SELECT
-        ap.ir_brand_cd,
-        v_STOCK_MONTH AS comm_apply_month,
-        p_month_cd AS month_cd,
-        NVL(sp.sp_price, ap.im_ccon_rmat_iss_upri) AS im_ccon_rmat_iss_upri
-    FROM A_price_base ap
-    LEFT JOIN Special_brand_price sp
-        ON sp.item_brn_cd = ap.ir_brand_cd
-),
-MAT AS (
-    SELECT
-        b.item_brn_cd AS ir_brand_cd,
-        v_STOCK_MONTH AS comm_apply_month,
-        p_month_cd AS month_cd,
-        a.im_ccon_rmat_iss_upri AS im_ccon_rmat_iss_upri,
-        b.resource_code,
-        b.item_product_code_n,
-        b.steel_grd_group,
-        b.category_segment4,
-        NVL(b.day_qty, 0) * EXTRACT(DAY FROM LAST_DAY(TO_DATE(v_STOCK_MONTH, 'YYYYMM'))) AS rmat_use_pln_qt
-    FROM B_usage b
-    LEFT JOIN A a
-        ON a.ir_brand_cd = b.item_brn_cd
-    WHERE b.resource_code IS NOT NULL
-),
-CODE AS (
-    SELECT DISTINCT
-        c010.category_segment1,
-        c010.category_segment2,
-        c010.category_segment3,
-        c010.category_segment4,
-        c020.item_brn_cd,
-        c010.seq
-    FROM posplot.tb_t18_comm010 c010
-    LEFT JOIN posplot.tb_t18_comm020 c020
-        ON c020.category_segment4 = c010.category_segment4
-    WHERE c010.sm_cc_tpdt_sbm_f = 'Y'
-),
-P AS (
-    SELECT
-        a.works_code,
-        a.category_segment4,
-        a.item_brn_cd,
-        NVL(SUM(a.ir_che_prod_use_qt * a.unit_price) / NULLIF(SUM(a.ir_che_prod_use_qt), 0), 0) / 1000 AS im_ccon_rmat_iss_upri
-    FROM posplot.tb_t18_molt082 a
-    INNER JOIN (
-        SELECT
-            MAX(day_cd) AS day_cd,
-            works_code,
-            category_segment4,
-            item_brn_cd
-        FROM posplot.tb_t18_molt082
-        WHERE day_cd <= p_month_cd
-            AND (category_segment4 LIKE 'C02%' 
-                OR category_segment4 LIKE 'C05%' 
-                OR category_segment4 LIKE 'C01%')
-            AND category_segment4 <> 'C0111'
-            AND data_type = 'M'
-            AND works_code = p_works_code
-        GROUP BY works_code, category_segment4, item_brn_cd
-    ) b
-        ON a.day_cd = b.day_cd
-        AND a.works_code = b.works_code
-        AND a.category_segment4 = b.category_segment4
-        AND a.item_brn_cd = b.item_brn_cd
-    WHERE a.process_code = 'CC'
-    GROUP BY a.works_code, a.category_segment4, a.item_brn_cd
-),
-PQ_keyed AS (
-    SELECT 
-        resource_code, month_cd, comm_apply_month, 
-        item_product_code_n, steel_grd_group, smg_prd_qty
-    FROM v_TEMP_PROD_QTY
-),
-PQ_std AS (
-    SELECT 
-        resource_code, item_product_code_n, steel_grd_group, smg_prd_qty
-    FROM v_TEMP_PROD_QTY
-    WHERE month_cd = ''
-),
-PL AS (
-    SELECT 
-        month_cd, comm_apply_month, resource_code, 
-        item_product_code_n, steel_grd_group, smg_prd_qty
-    FROM v_TEMP_PLAN_QTY
-)
-SELECT
-    pr.pr_month_cd AS p_month_cd,
-    pr.pr_STOCK_MONTH AS v_stock_month,
-    pr.pr_works_code AS works_code,
-    'CC' AS process_code,
-    MAT.resource_code AS component_item_number,
-    CODE.category_segment1,
-    CODE.category_segment2,
-    CODE.category_segment3,
-    CODE.category_segment4,
-    MAT.item_product_code_n,
-    MAT.steel_grd_group,
-    CODE.item_brn_cd,
-    CASE 
-        WHEN CODE.category_segment4 NOT LIKE 'C04%'
-        THEN NVL(MAT.rmat_use_pln_qt / NULLIF(k.smg_prd_qty, 0), 0)
-        ELSE 0
-    END AS im_std_rmat_usg_cca,
-    NVL(MAT.rmat_use_pln_qt / NULLIF(s.smg_prd_qty * pr.days_in_month, 0), 0) 
-        * pln.smg_prd_qty AS ir_che_prod_use_qt,
-    NVL(MAT.rmat_use_pln_qt / NULLIF(s.smg_prd_qty * pr.days_in_month, 0), 0) 
-        * 1000 AS rmat_std_ut_csum2,
-    (CASE 
-        WHEN NVL(MAT.im_ccon_rmat_iss_upri, 0) = 0
-        THEN p.im_ccon_rmat_iss_upri
-        ELSE MAT.im_ccon_rmat_iss_upri
-    END) * 1000 AS im_ccon_rmat_iss_upri,
-    ((CASE 
-        WHEN NVL(MAT.im_ccon_rmat_iss_upri, 0) = 0
-        THEN p.im_ccon_rmat_iss_upri
-        ELSE MAT.im_ccon_rmat_iss_upri
-    END) * 1000)
-        * NVL(MAT.rmat_use_pln_qt / NULLIF(s.smg_prd_qty * pr.days_in_month, 0), 0) 
-        AS item_cst_nor_amt,
-    SYSDATE AS created_at,
-    'R' AS actual_type,
-    CODE.seq
-FROM MAT
-CROSS JOIN params pr
-LEFT JOIN CODE
-    ON MAT.ir_brand_cd = CODE.item_brn_cd
-    AND MAT.category_segment4 = CODE.category_segment4
-LEFT JOIN P
-    ON MAT.category_segment4 = P.category_segment4
-    AND MAT.ir_brand_cd = P.item_brn_cd
-    AND p_works_code = P.works_code
-LEFT JOIN PQ_keyed k
-    ON k.month_cd = MAT.month_cd
-    AND k.comm_apply_month = MAT.comm_apply_month
-    AND k.resource_code = MAT.resource_code
-    AND k.item_product_code_n = MAT.item_product_code_n
-    AND k.steel_grd_group = MAT.steel_grd_group
-LEFT JOIN PQ_std s
-    ON s.resource_code = MAT.resource_code
-    AND s.item_product_code_n = MAT.item_product_code_n
-    AND s.steel_grd_group = MAT.steel_grd_group
-LEFT JOIN PL pln
-    ON pln.month_cd = MAT.month_cd
-    AND pln.comm_apply_month = MAT.comm_apply_month
-    AND pln.resource_code = MAT.resource_code
-    AND pln.item_product_code_n = MAT.item_product_code_n
-    AND pln.steel_grd_group = MAT.steel_grd_group
-WHERE MAT.comm_apply_month = v_STOCK_MONTH;
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+PostgreSQL to Oracle 프로시저 완전 자동 변환 도구
+입력: postgres.sql + ast.json
+출력: oracle.sql
+"""
+
+import json
+import os
+import re
+import requests
+import time
+from pathlib import Path
+
+# ============================================================================
+# 설정 (여기를 수정하세요)
+# ============================================================================
+
+# 입력 파일 경로
+SQL_FILE_PATH = "./postgres_procedure.sql"
+AST_JSON_PATH = "./procedure_ast.json"
+
+# 출력 파일 경로
+OUTPUT_SQL_FILE = "./oracle_procedure.sql"
+
+# LLM API 설정
+LLM_API_URL = "https://your-company-api.com/v1/chat/completions"
+LLM_API_KEY = "your-api-key-here"
+LLM_MODEL = "gpt-4.1"
+
+# LLM 호출 설정
+REQUEST_TIMEOUT = 120  # 타임아웃 (초)
+RETRY_COUNT = 3        # 실패 시 재시도 횟수
+DELAY_BETWEEN_CALLS = 2  # API 호출 간 대기 시간 (초)
+
+# 청크 분할 기준
+MAX_CHUNK_LINES = 300  # 일반 청크 최대 라인
+MAX_CTE_LINES = 500    # CTE는 더 길 수 있음
+
+# 로그 디렉토리
+LOG_DIR = "./conversion_logs"
+
+# ============================================================================
+# LLM 호출 함수
+# ============================================================================
+
+def call_llm(user_message, system_message="당신은 PostgreSQL을 Oracle로 변환하는 전문가입니다.", retry=0):
+    """LLM API 호출 (재시도 로직 포함)"""
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": LLM_API_KEY
+    }
+    
+    payload = {
+        "messages": [
+            {
+                "role": "system",
+                "content": system_message
+            },
+            {
+                "role": "user",
+                "content": user_message
+            }
+        ],
+        "model": LLM_MODEL
+    }
+    
+    try:
+        response = requests.post(
+            LLM_API_URL, 
+            headers=headers, 
+            json=payload, 
+            timeout=REQUEST_TIMEOUT
+        )
+        response.raise_for_status()
+        
+        # 응답 텍스트 반환
+        return response.text
+        
+    except requests.exceptions.RequestException as e:
+        print(f"  ⚠️  API 호출 실패: {e}")
+        
+        if retry < RETRY_COUNT:
+            print(f"  🔄 재시도 중... ({retry + 1}/{RETRY_COUNT})")
+            time.sleep(DELAY_BETWEEN_CALLS * 2)
+            return call_llm(user_message, system_message, retry + 1)
+        else:
+            print(f"  ❌ 최대 재시도 횟수 초과")
+            return None
+
+# ============================================================================
+# 파일 로드
+# ============================================================================
+
+def load_files():
+    """SQL 파일과 AST 파일 로드"""
+    
+    print("📂 파일 로딩 중...")
+    
+    # SQL 파일 읽기
+    with open(SQL_FILE_PATH, 'r', encoding='utf-8') as f:
+        sql_content = f.read()
+        sql_lines = sql_content.split('\n')
+    
+    # AST JSON 읽기
+    with open(AST_JSON_PATH, 'r', encoding='utf-8') as f:
+        ast_data = json.load(f)
+    
+    print(f"  ✓ SQL 파일: {len(sql_lines)} 라인")
+    print(f"  ✓ AST 구조 로드 완료")
+    
+    return sql_lines, ast_data
+
+# ============================================================================
+# AST 요약 (토큰 절약)
+# ============================================================================
+
+def create_ast_summary(ast_data, max_depth=3, current_depth=0):
+    """AST를 요약하여 LLM 토큰 절약"""
+    
+    if current_depth >= max_depth:
+        return {"type": "...", "note": "생략"}
+    
+    if isinstance(ast_data, dict):
+        summary = {}
+        for key in ['type', 'startLine', 'endLine']:
+            if key in ast_data:
+                summary[key] = ast_data[key]
+        
+        if 'children' in ast_data and ast_data['children']:
+            children = ast_data['children']
+            if len(children) > 15:
+                summary['children'] = [
+                    create_ast_summary(children[0], max_depth, current_depth + 1),
+                    {"note": f"... {len(children)-2}개 생략 ..."},
+                    create_ast_summary(children[-1], max_depth, current_depth + 1)
+                ]
+            else:
+                summary['children'] = [
+                    create_ast_summary(child, max_depth, current_depth + 1) 
+                    for child in children
+                ]
+        
+        return summary
+    
+    return ast_data
+
+# ============================================================================
+# 1단계: AST 분석 및 청크 분할 전략
+# ============================================================================
+
+def analyze_and_chunk(sql_lines, ast_data):
+    """LLM을 활용한 AST 분석 및 청크 분할"""
+    
+    print("\n🔍 [1/4] AST 구조 분석 및 청크 분할 전략 수립 중...")
+    
+    ast_summary = create_ast_summary(ast_data)
+    
+    prompt = f"""
+다음은 PostgreSQL 프로시저의 AST 구조입니다:
+```json
+{json.dumps(ast_summary, indent=2, ensure_ascii=False)}
+```
+
+전체 라인 수: {len(sql_lines)}
+
+이 프로시저를 Oracle로 변환하기 위해 적절한 청크로 분할하려고 합니다.
+
+**분할 기준**:
+- 일반 섹션: 최대 {MAX_CHUNK_LINES} 라인
+- CTE/WITH 구문: 최대 {MAX_CTE_LINES} 라인 (길어도 괜찮음)
+- 논리적으로 독립적인 단위로 분할
+- SELECT, INSERT, UPDATE, DELETE는 가능하면 독립적으로
+
+**중요**: 반드시 아래 JSON 형식으로만 출력하세요. 다른 설명이나 마크다운은 불필요합니다.
+
+출력 형식:
+{{
+  "total_lines": {len(sql_lines)},
+  "structure_summary": "프로시저 전체 구조 간략 요약",
+  "chunks": [
+    {{
+      "chunk_id": 1,
+      "name": "간결한_청크_이름",
+      "ast_type": "AST의_실제_type값",
+      "start_line": 1,
+      "end_line": 50,
+      "size_lines": 50,
+      "priority": "HIGH",
+      "description": "이 섹션 설명",
+      "conversion_notes": "변환 시 주의사항"
+    }}
+  ]
+}}
+"""
+
+    response = call_llm(prompt)
+    
+    if not response:
+        print("  ❌ AST 분석 실패")
+        return None
+    
+    # JSON 추출
+    try:
+        # ```json ... ``` 제거
+        json_match = re.search(r'```json\s*(\{.*?\})\s*```', response, re.DOTALL)
+        if json_match:
+            analysis = json.loads(json_match.group(1))
+        else:
+            # { ... } 패턴 찾기
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                analysis = json.loads(json_match.group(0))
+            else:
+                analysis = json.loads(response)
+        
+        print(f"  ✓ 분석 완료: {len(analysis['chunks'])}개 청크로 분할")
+        
+        # 로그 저장
+        save_log("analysis_result.json", analysis)
+        
+        return analysis
+        
+    except json.JSONDecodeError as e:
+        print(f"  ❌ JSON 파싱 실패: {e}")
+        print(f"  응답 내용:\n{response[:500]}...")
+        save_log("analysis_error.txt", response)
+        return None
+
+# ============================================================================
+# 2단계: 청크별 변환
+# ============================================================================
+
+def convert_chunk(chunk, sql_lines, chunk_number, total_chunks, context):
+    """개별 청크를 Oracle로 변환"""
+    
+    print(f"\n  🔄 [{chunk_number}/{total_chunks}] {chunk['name']} 변환 중...")
+    print(f"     라인: {chunk['start_line']} ~ {chunk['end_line']} ({chunk['size_lines']} 라인)")
+    
+    # SQL 추출
+    start = chunk['start_line']
+    end = chunk['end_line']
+    sql_content = '\n'.join(sql_lines[start-1:end])
+    
+    # 변환 프롬프트 생성
+    prompt = f"""
+PostgreSQL 프로시저의 일부를 Oracle 19c로 변환해주세요.
+
+**청크 정보**:
+- 청크 ID: {chunk['chunk_id']}/{total_chunks}
+- 이름: {chunk['name']}
+- AST 타입: {chunk['ast_type']}
+- 라인 범위: {chunk['start_line']} ~ {chunk['end_line']}
+- 설명: {chunk['description']}
+- 주의사항: {chunk['conversion_notes']}
+
+**전체 컨텍스트**:
+{context}
+
+**주요 변환 규칙**:
+- COALESCE() → NVL() 또는 NVL2()
+- date_part(field, date) → EXTRACT(field FROM date)
+- substring(str, start, len) → SUBSTR(str, start, len)
+- now() → SYSDATE
+- PERFORM → SELECT INTO v_dummy FROM dual
+- RAISE NOTICE → DBMS_OUTPUT.PUT_LINE
+- VARCHAR → VARCHAR2
+- INTEGER → NUMBER
+- BOOLEAN → NUMBER(1)
+- string_agg() → LISTAGG()
+- array_agg() → LISTAGG() 또는 COLLECT()
+- CREATE OR REPLACE FUNCTION → CREATE OR REPLACE PROCEDURE (RETURNS void인 경우)
+- LANGUAGE plpgsql 제거
+- $$ ... $$ → BEGIN ... END; /
+
+**변환할 PostgreSQL 코드**:
+```sql
+{sql_content}
+```
+
+**중요**: 
+1. 변환된 Oracle 코드만 출력하세요
+2. 코드 블록(```)이나 "여기 변환된 코드입니다" 같은 설명은 불필요합니다
+3. 오직 실행 가능한 Oracle SQL 코드만 출력하세요
+4. 주석으로 주요 변경사항을 간단히 표시하세요
+"""
+
+    response = call_llm(prompt)
+    
+    if not response:
+        print(f"     ❌ 변환 실패")
+        return None
+    
+    # 코드 블록 제거 (```sql ... ``` 또는 ``` ... ```)
+    oracle_code = response.strip()
+    oracle_code = re.sub(r'^```sql\s*', '', oracle_code)
+    oracle_code = re.sub(r'^```\s*', '', oracle_code)
+    oracle_code = re.sub(r'\s*```$', '', oracle_code)
+    
+    print(f"     ✓ 변환 완료 ({len(oracle_code)} 문자)")
+    
+    # 로그 저장
+    save_log(f"chunk_{chunk['chunk_id']:03d}_original.sql", sql_content)
+    save_log(f"chunk_{chunk['chunk_id']:03d}_converted.sql", oracle_code)
+    
+    # API 호출 간 대기
+    time.sleep(DELAY_BETWEEN_CALLS)
+    
+    return oracle_code
+
+def convert_all_chunks(chunks, sql_lines, context):
+    """모든 청크를 변환"""
+    
+    print("\n🔄 [2/4] 청크별 Oracle 변환 중...")
+    
+    converted_chunks = []
+    total = len(chunks)
+    
+    for i, chunk in enumerate(chunks, 1):
+        converted = convert_chunk(chunk, sql_lines, i, total, context)
+        
+        if converted:
+            converted_chunks.append({
+                'chunk_id': chunk['chunk_id'],
+                'name': chunk['name'],
+                'start_line': chunk['start_line'],
+                'end_line': chunk['end_line'],
+                'oracle_code': converted
+            })
+        else:
+            print(f"  ⚠️  청크 {chunk['chunk_id']} 변환 실패, 건너뜀")
+    
+    print(f"\n  ✓ {len(converted_chunks)}/{total} 청크 변환 완료")
+    
+    return converted_chunks
+
+# ============================================================================
+# 3단계: 청크 병합
+# ============================================================================
+
+def merge_chunks(converted_chunks, analysis):
+    """변환된 청크들을 하나의 Oracle 프로시저로 병합"""
+    
+    print("\n🔗 [3/4] 변환된 청크 병합 중...")
+    
+    # 청크 ID 순으로 정렬
+    converted_chunks.sort(key=lambda x: x['chunk_id'])
+    
+    merged_sql = []
+    
+    # 헤더 추가
+    merged_sql.append("-- ============================================================================")
+    merged_sql.append("-- PostgreSQL to Oracle 자동 변환 결과")
+    merged_sql.append(f"-- 원본: {SQL_FILE_PATH}")
+    merged_sql.append(f"-- 변환 일시: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    merged_sql.append(f"-- 총 청크 수: {len(converted_chunks)}")
+    merged_sql.append("-- ============================================================================")
+    merged_sql.append("")
+    
+    # 각 청크 병합
+    for chunk in converted_chunks:
+        merged_sql.append(f"-- Chunk {chunk['chunk_id']}: {chunk['name']}")
+        merged_sql.append(f"-- Original lines: {chunk['start_line']} - {chunk['end_line']}")
+        merged_sql.append("-" * 80)
+        merged_sql.append(chunk['oracle_code'])
+        merged_sql.append("")
+    
+    result = '\n'.join(merged_sql)
+    
+    print(f"  ✓ 병합 완료 ({len(result)} 문자)")
+    
+    return result
+
+# ============================================================================
+# 4단계: 최종 정리 및 검증
+# ============================================================================
+
+def finalize_and_validate(merged_sql):
+    """최종 SQL 정리 및 기본 검증"""
+    
+    print("\n✨ [4/4] 최종 정리 및 검증 중...")
+    
+    # LLM에게 최종 검토 요청
+    prompt = f"""
+다음은 PostgreSQL에서 Oracle로 자동 변환된 프로시저입니다.
+
+**검토 요청사항**:
+1. 전체적인 구조가 올바른지 확인
+2. 누락된 변환이 있는지 확인
+3. 문법 오류가 있는지 확인
+4. 필요한 수정사항을 적용
+
+**변환된 코드**:
+```sql
+{merged_sql[:10000]}  # 처음 10000자만 (너무 길면 잘림)
+...
+```
+
+**출력 형식**:
+1. 검토 결과를 간단히 요약
+2. 수정이 필요한 부분이 있다면 수정된 전체 코드 출력
+3. 수정이 필요없다면 "검증 완료. 수정 불필요"라고만 출력
+"""
+
+    print("  🔍 LLM 최종 검증 중...")
+    response = call_llm(prompt)
+    
+    if response and "수정 불필요" not in response:
+        # 코드 블록 추출 시도
+        code_match = re.search(r'```sql\s*(.*?)\s*```', response, re.DOTALL)
+        if code_match:
+            print("  ✓ 최종 수정 사항 적용됨")
+            return code_match.group(1)
+    
+    print("  ✓ 검증 완료")
+    return merged_sql
+
+# ============================================================================
+# 로그 저장
+# ============================================================================
+
+def save_log(filename, content):
+    """로그 파일 저장"""
+    
+    log_path = Path(LOG_DIR)
+    log_path.mkdir(exist_ok=True)
+    
+    filepath = log_path / filename
+    
+    if isinstance(content, dict):
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(content, f, indent=2, ensure_ascii=False)
+    else:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(str(content))
+
+# ============================================================================
+# 메인 실행
+# ============================================================================
+
+def main():
+    """메인 실행 함수"""
+    
+    print("\n" + "="*80)
+    print("🚀 PostgreSQL to Oracle 완전 자동 변환 시스템")
+    print("="*80 + "\n")
+    
+    start_time = time.time()
+    
+    try:
+        # 1. 파일 로드
+        sql_lines, ast_data = load_files()
+        
+        # 2. AST 분석 및 청크 분할
+        analysis = analyze_and_chunk(sql_lines, ast_data)
+        if not analysis:
+            print("\n❌ 분석 실패. 프로그램을 종료합니다.")
+            return
+        
+        context = analysis['structure_summary']
+        
+        # 3. 청크별 변환
+        converted_chunks = convert_all_chunks(analysis['chunks'], sql_lines, context)
+        
+        if not converted_chunks:
+            print("\n❌ 변환된 청크가 없습니다. 프로그램을 종료합니다.")
+            return
+        
+        # 4. 청크 병합
+        merged_sql = merge_chunks(converted_chunks, analysis)
+        
+        # 5. 최종 정리 및 검증
+        final_sql = finalize_and_validate(merged_sql)
+        
+        # 6. 최종 파일 저장
+        with open(OUTPUT_SQL_FILE, 'w', encoding='utf-8') as f:
+            f.write(final_sql)
+        
+        elapsed_time = time.time() - start_time
+        
+        print("\n" + "="*80)
+        print("✅ 변환 완료!")
+        print("="*80)
+        print(f"\n📄 출력 파일: {OUTPUT_SQL_FILE}")
+        print(f"📊 변환 통계:")
+        print(f"   - 원본 라인 수: {len(sql_lines)}")
+        print(f"   - 총 청크 수: {len(analysis['chunks'])}")
+        print(f"   - 변환된 청크: {len(converted_chunks)}")
+        print(f"   - 소요 시간: {elapsed_time:.1f}초")
+        print(f"\n📁 로그 디렉토리: {LOG_DIR}/")
+        print(f"   - 각 청크별 변환 전/후 파일 저장됨")
+        print(f"   - 분석 결과: analysis_result.json")
+        print("\n⚠️  변환된 SQL을 실행하기 전에 반드시 검토하세요!\n")
+        
+    except Exception as e:
+        print(f"\n❌ 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
+        save_log("error.txt", traceback.format_exc())
+
+if __name__ == "__main__":
+    main()
