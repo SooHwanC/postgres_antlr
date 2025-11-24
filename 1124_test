@@ -1,221 +1,240 @@
+INSERT INTO posplot.tb_t18_molt088 (
+    day_cd, comm_apply_month, works_code, process_code, component_item_number,
+    category_segment1, category_segment2, category_segment3, category_segment4, 
+    item_product_code_n, steel_grd_group, item_brn_cd,
+    im_std_rmat_usg_cca, ir_che_prod_use_qt, rmat_std_ut_csum2, 
+    unit_price, item_cst_nor_amt, rmat_stk_dt, actual_type, seq
+)
 WITH
-    params AS (
+params AS (
+    SELECT
+        TO_CHAR(p_month_cd) AS pr_month_cd,
+        TO_CHAR(v_STOCK_MONTH) AS pr_stock_month,
+        TO_CHAR(p_works_code) AS pr_works_code,
+        EXTRACT(DAY FROM LAST_DAY(TO_DATE(v_STOCK_MONTH, 'YYYYMM'))) AS days_in_month
+    FROM DUAL
+),
+B_usage AS (
+    SELECT
+        x.works_code,
+        x.item_brn_cd,
+        x.slab_mat_fac_tp AS resource_code,
+        x.item_product_code_n,
+        x.steel_grd_group,
+        x.category_segment3,
+        x.category_segment4,
+        SUM(x.ir_che_prod_use_qt) / MAX(y.total_work_day) AS day_qty
+    FROM posplot.tb_t18_molt082 x
+    INNER JOIN v_TEMP_WORK_DAY y
+        ON x.works_code = y.works_code
+        AND x.day_cd = y.day_cd
+        AND x.process_code = y.process_code
+        AND x.slab_mat_fac_tp = y.slab_mat_fac_tp
+        AND x.item_product_code_n = y.item_product_code_n
+        AND x.steel_grd_group = y.steel_grd_group
+    WHERE x.data_type = 'M'
+        AND x.process_code = 'CC'
+        AND x.category_segment4 LIKE 'C%'
+        AND SUBSTR(x.category_segment4, 1, 3) NOT IN ('C04', 'C06')
+        AND x.category_segment4 <> 'C0111'
+    GROUP BY 
+        x.works_code, x.category_segment3, x.category_segment4,
+        x.slab_mat_fac_tp, x.item_product_code_n, x.steel_grd_group, x.item_brn_cd
+),
+molt101 AS (
+    SELECT 
+        month_cd,
+        stock_month,
+        works_code,
+        item,
+        pred_flag,
+        total_stock_unit_price
+    FROM posplot.tb_t18_molt101
+    WHERE month_cd = p_month_cd
+        AND stock_month = v_STOCK_MONTH
+        AND works_code = p_works_code
+),
+A_price_base AS (
+    SELECT
+        a.seq,
+        a.month_cd,
+        a.works_code,
+        a.comm_apply_month,
+        a.ir_brand_cd,
+        NVL(b.total_stock_unit_price, a.im_ccon_rmat_iss_upri) AS im_ccon_rmat_iss_upri,
+        a.actual_type
+    FROM posplot.tb_t18_molt100 a
+    LEFT JOIN molt101 b
+        ON a.month_cd = b.month_cd
+        AND a.comm_apply_month = b.stock_month
+        AND a.works_code = b.works_code
+        AND a.ir_brand_cd = b.item
+        AND a.actual_type = b.pred_flag
+    WHERE a.month_cd = p_month_cd
+        AND a.works_code = p_works_code
+        AND a.comm_apply_month = v_STOCK_MONTH
+        AND a.actual_type = 'R'
+),
+Special_brand_price AS (
+    SELECT 
+        DECODE(process_code, 'BF', 'EF2A0001', 'FN', 'EF2A0003') AS item_brn_cd,
+        item_cst_nor_amt / 1000 AS sp_price
+    FROM posplot.tb_t18_molt070
+    WHERE day_cd = p_month_cd
+        AND comm_apply_month = v_STOCK_MONTH
+        AND works_code = p_works_code
+        AND process_code IN ('BF', 'FN')
+        AND component_item_number = 'ALL'
+        AND category_segment4 = 'B0101'
+        AND actual_type = 'R'
+),
+A AS (
+    SELECT
+        ap.ir_brand_cd,
+        v_STOCK_MONTH AS comm_apply_month,
+        p_month_cd AS month_cd,
+        NVL(sp.sp_price, ap.im_ccon_rmat_iss_upri) AS im_ccon_rmat_iss_upri
+    FROM A_price_base ap
+    LEFT JOIN Special_brand_price sp
+        ON sp.item_brn_cd = ap.ir_brand_cd
+),
+MAT AS (
+    SELECT
+        b.item_brn_cd AS ir_brand_cd,
+        v_STOCK_MONTH AS comm_apply_month,
+        p_month_cd AS month_cd,
+        a.im_ccon_rmat_iss_upri AS im_ccon_rmat_iss_upri,
+        b.resource_code,
+        b.item_product_code_n,
+        b.steel_grd_group,
+        b.category_segment4,
+        NVL(b.day_qty, 0) * EXTRACT(DAY FROM LAST_DAY(TO_DATE(v_STOCK_MONTH, 'YYYYMM'))) AS rmat_use_pln_qt
+    FROM B_usage b
+    LEFT JOIN A a
+        ON a.ir_brand_cd = b.item_brn_cd
+    WHERE b.resource_code IS NOT NULL
+),
+CODE AS (
+    SELECT DISTINCT
+        c010.category_segment1,
+        c010.category_segment2,
+        c010.category_segment3,
+        c010.category_segment4,
+        c020.item_brn_cd,
+        c010.seq
+    FROM posplot.tb_t18_comm010 c010
+    LEFT JOIN posplot.tb_t18_comm020 c020
+        ON c020.category_segment4 = c010.category_segment4
+    WHERE c010.sm_cc_tpdt_sbm_f = 'Y'
+),
+P AS (
+    SELECT
+        a.works_code,
+        a.category_segment4,
+        a.item_brn_cd,
+        NVL(SUM(a.ir_che_prod_use_qt * a.unit_price) / NULLIF(SUM(a.ir_che_prod_use_qt), 0), 0) / 1000 AS im_ccon_rmat_iss_upri
+    FROM posplot.tb_t18_molt082 a
+    INNER JOIN (
         SELECT
-            CAST(p_month_cd AS VARCHAR2(100))   AS pr_month_cd
-          , CAST(v_STOCK_MONTH AS VARCHAR2(100)) AS pr_stock_month
-          , CAST(p_works_code AS VARCHAR2(100))  AS pr_works_code
-          , EXTRACT(DAY FROM LAST_DAY(TO_DATE(v_STOCK_MONTH,'yyyymm'))) AS days_in_month
-    ),
-    B_usage AS (
-        SELECT
-            x.works_code
-          , x.item_brn_cd
-          , x.slab_mat_fac_tp         AS resource_code
-          , x.item_product_code_n
-          , x.steel_grd_group
-          , x.category_segment3
-          , x.category_segment4
-          , SUM(x.ir_che_prod_use_qt) / MAX(y.total_work_day) AS day_qty
-        FROM posplot.tb_t18_molt082 x
-        JOIN v_TEMP_WORK_DAY y
-          ON x.works_code           = y.works_code
-         AND x.day_cd               = y.day_cd
-         AND x.process_code         = y.process_code
-         AND x.slab_mat_fac_tp      = y.slab_mat_fac_tp
-         AND x.item_product_code_n  = y.item_product_code_n
-         AND x.steel_grd_group      = y.steel_grd_group
-        WHERE x.data_type = 'M'
-          AND x.process_code = 'CC'
-          AND x.category_segment4 LIKE 'C%'
-          AND SUBSTR(x.category_segment4,1,3) NOT IN ('C04','C06')
-          AND x.category_segment4 != 'C0111'
-        GROUP BY x.works_code, x.category_segment3, x.category_segment4
-               , x.slab_mat_fac_tp, x.item_product_code_n, x.steel_grd_group, x.item_brn_cd
-    ),
-    molt101 AS (
-        SELECT month_cd
-             , stock_month
-             , works_code
-             , item
-             , pred_flag
-             , total_stock_unit_price
-          FROM posplot.tb_t18_molt101
-         WHERE month_cd          = p_month_cd
-           AND stock_month       = v_STOCK_MONTH
-           AND works_code        = p_works_code
-    ),
-    A_price_base AS (
-        SELECT
-            a.seq
-          , a.month_cd
-          , a.works_code
-          , a.comm_apply_month
-          , a.ir_brand_cd
-          , COALESCE(b.total_stock_unit_price, a.im_ccon_rmat_iss_upri) AS im_ccon_rmat_iss_upri
-          , a.actual_type
-        FROM posplot.tb_t18_molt100 a
-        LEFT JOIN molt101 b
-          ON a.month_cd         = b.month_cd
-         AND a.comm_apply_month = b.stock_month
-         AND a.works_code       = b.works_code
-         AND a.ir_brand_cd      = b.item
-         AND a.actual_type      = b.pred_flag
-        WHERE a.month_cd         = p_month_cd
-          AND a.works_code       = p_works_code
-          AND a.comm_apply_month = v_STOCK_MONTH
-          AND a.actual_type      = 'R'
-    ),
-    Special_brand_price AS (
-        SELECT DECODE(process_code, 'BF','EF2A0001', 'FN','EF2A0003') AS item_brn_cd
-             , item_cst_nor_amt/1000 AS sp_price
-          FROM posplot.tb_t18_molt070
-         WHERE day_cd              = p_month_cd
-           AND comm_apply_month    = v_STOCK_MONTH
-           AND works_code          = p_works_code
-           AND process_code        IN ('BF','FN')
-           AND component_item_number = 'ALL'
-           AND category_segment4   = 'B0101'
-           AND actual_type         = 'R'
-    ),
-    A AS (
-        SELECT
-            ap.ir_brand_cd
-          , v_STOCK_MONTH AS comm_apply_month
-          , p_month_cd    AS month_cd
-          , COALESCE(sp.sp_price, ap.im_ccon_rmat_iss_upri) AS im_ccon_rmat_iss_upri
-        FROM A_price_base ap
-        LEFT JOIN Special_brand_price sp
-          ON sp.item_brn_cd = ap.ir_brand_cd
-    ),
-    MAT AS (
-        SELECT
-            b.item_brn_cd                    AS ir_brand_cd
-          , v_STOCK_MONTH                  AS comm_apply_month
-          , p_month_cd                     AS month_cd
-          , a.im_ccon_rmat_iss_upri         AS im_ccon_rmat_iss_upri
-          , b.resource_code
-          , b.item_product_code_n
-          , b.steel_grd_group
-          , b.category_segment4
-          , COALESCE(b.day_qty,0) * EXTRACT(DAY FROM LAST_DAY(TO_DATE(v_STOCK_MONTH,'yyyymm'))) AS rmat_use_pln_qt
-        FROM B_usage b
-        LEFT JOIN A a
-          ON a.ir_brand_cd = b.item_brn_cd
-        WHERE b.resource_code IS NOT NULL
-    ),
-    CODE AS (
-        SELECT DISTINCT
-            c010.category_segment1
-          , c010.category_segment2
-          , c010.category_segment3
-          , c010.category_segment4
-          , c020.item_brn_cd
-          , c010.seq
-        FROM posplot.tb_t18_comm010 c010
-        LEFT JOIN posplot.tb_t18_comm020 c020
-          ON c020.category_segment4 = c010.category_segment4
-        WHERE c010.sm_cc_tpdt_sbm_f = 'Y'
-    ),
-    P AS (
-        SELECT
-            a.works_code
-          , a.category_segment4
-          , a.item_brn_cd
-          , COALESCE(SUM(a.ir_che_prod_use_qt * a.unit_price) / NULLIF(SUM(a.ir_che_prod_use_qt),0),0) / 1000 AS im_ccon_rmat_iss_upri
-        FROM posplot.tb_t18_molt082 a
-        JOIN (
-            SELECT
-                MAX(day_cd) AS day_cd
-              , works_code
-              , category_segment4
-              , item_brn_cd
-            FROM posplot.tb_t18_molt082
-            WHERE day_cd <= p_month_cd
-              AND (category_segment4 LIKE 'C02%' OR category_segment4 LIKE 'C05%' OR category_segment4 LIKE 'C01%')
-              AND category_segment4 != 'C0111'
-              AND data_type = 'M'
-              AND works_code = p_works_code
-            GROUP BY works_code, category_segment4, item_brn_cd
-        ) b
-          ON  a.day_cd           = b.day_cd
-          AND a.works_code       = b.works_code
-          AND a.category_segment4= b.category_segment4
-          AND a.item_brn_cd      = b.item_brn_cd
-        WHERE a.process_code = 'CC'
-        GROUP BY a.works_code, a.category_segment4, a.item_brn_cd
-    ),
-    PQ_keyed AS (  -- v_TEMP_PROD_QTY (월/적용월 기준)
-        SELECT resource_code, month_cd, comm_apply_month, item_product_code_n, steel_grd_group, smg_prd_qty
-        FROM v_TEMP_PROD_QTY
-    ),
-    PQ_std AS (    -- v_TEMP_PROD_QTY (month_cd = '' 기준)
-        SELECT resource_code, item_product_code_n, steel_grd_group, smg_prd_qty
-        FROM v_TEMP_PROD_QTY
-        WHERE month_cd = '.'
-    ),
-    PL AS (        -- v_TEMP_PLAN_QTY
-        SELECT month_cd, comm_apply_month, resource_code, item_product_code_n, steel_grd_group, smg_prd_qty
-        FROM v_TEMP_PLAN_QTY
-    )
-INSERT INTO posplot.tb_t18_molt088 (day_cd, comm_apply_month, works_code, process_code, component_item_number,
-                                category_segment1, category_segment2, category_segment3, category_segment4, item_product_code_n, steel_grd_group, item_brn_cd,
-                                im_std_rmat_usg_cca, ir_che_prod_use_qt, rmat_std_ut_csum2, unit_price, item_cst_nor_amt, rmat_stk_dt, actual_type,seq)
+            MAX(day_cd) AS day_cd,
+            works_code,
+            category_segment4,
+            item_brn_cd
+        FROM posplot.tb_t18_molt082
+        WHERE day_cd <= p_month_cd
+            AND (category_segment4 LIKE 'C02%' 
+                OR category_segment4 LIKE 'C05%' 
+                OR category_segment4 LIKE 'C01%')
+            AND category_segment4 <> 'C0111'
+            AND data_type = 'M'
+            AND works_code = p_works_code
+        GROUP BY works_code, category_segment4, item_brn_cd
+    ) b
+        ON a.day_cd = b.day_cd
+        AND a.works_code = b.works_code
+        AND a.category_segment4 = b.category_segment4
+        AND a.item_brn_cd = b.item_brn_cd
+    WHERE a.process_code = 'CC'
+    GROUP BY a.works_code, a.category_segment4, a.item_brn_cd
+),
+PQ_keyed AS (
+    SELECT 
+        resource_code, month_cd, comm_apply_month, 
+        item_product_code_n, steel_grd_group, smg_prd_qty
+    FROM v_TEMP_PROD_QTY
+),
+PQ_std AS (
+    SELECT 
+        resource_code, item_product_code_n, steel_grd_group, smg_prd_qty
+    FROM v_TEMP_PROD_QTY
+    WHERE month_cd = ''
+),
+PL AS (
+    SELECT 
+        month_cd, comm_apply_month, resource_code, 
+        item_product_code_n, steel_grd_group, smg_prd_qty
+    FROM v_TEMP_PLAN_QTY
+)
 SELECT
-      pr.pr_month_cd                 AS p_month_cd
-    , pr.pr_stock_month             AS v_stock_month
-    , pr.pr_works_code              AS works_code
-    , 'CC'                          AS process_code
-    , MAT.resource_code             AS component_item_number
-    , CODE.category_segment1
-    , CODE.category_segment2
-    , CODE.category_segment3
-    , CODE.category_segment4
-    , MAT.item_product_code_n
-    , MAT.steel_grd_group
-    , CODE.item_brn_cd
-    , CASE WHEN CODE.category_segment4 NOT LIKE 'C04%'
-                 THEN COALESCE(MAT.rmat_use_pln_qt / NULLIF(k.smg_prd_qty,0), 0)
-                 ELSE 0
-          END AS im_std_rmat_usg_cca
-    , COALESCE(MAT.rmat_use_pln_qt / NULLIF(s.smg_prd_qty * pr.days_in_month, 0), 0)
-      * pln.smg_prd_qty AS ir_che_prod_use_qt
-    , COALESCE(MAT.rmat_use_pln_qt / NULLIF(s.smg_prd_qty * pr.days_in_month, 0), 0) * 1000 AS rmat_std_ut_csum2
-    , (CASE WHEN COALESCE(MAT.im_ccon_rmat_iss_upri,0) = 0
-                  THEN p.im_ccon_rmat_iss_upri
-                  ELSE MAT.im_ccon_rmat_iss_upri
-           END) * 1000 AS im_ccon_rmat_iss_upri
-    , ((CASE WHEN COALESCE(MAT.im_ccon_rmat_iss_upri,0) = 0
-                   THEN p.im_ccon_rmat_iss_upri
-                   ELSE MAT.im_ccon_rmat_iss_upri
-          END) * 1000)
-      * COALESCE(MAT.rmat_use_pln_qt / NULLIF(s.smg_prd_qty * pr.days_in_month, 0), 0)
-      AS item_cst_nor_amt
-    , SYSDATE AS rmat_stk_dt
-    , 'R'   AS actual_type
-    , CODE.seq
+    pr.pr_month_cd AS p_month_cd,
+    pr.pr_STOCK_MONTH AS v_stock_month,
+    pr.pr_works_code AS works_code,
+    'CC' AS process_code,
+    MAT.resource_code AS component_item_number,
+    CODE.category_segment1,
+    CODE.category_segment2,
+    CODE.category_segment3,
+    CODE.category_segment4,
+    MAT.item_product_code_n,
+    MAT.steel_grd_group,
+    CODE.item_brn_cd,
+    CASE 
+        WHEN CODE.category_segment4 NOT LIKE 'C04%'
+        THEN NVL(MAT.rmat_use_pln_qt / NULLIF(k.smg_prd_qty, 0), 0)
+        ELSE 0
+    END AS im_std_rmat_usg_cca,
+    NVL(MAT.rmat_use_pln_qt / NULLIF(s.smg_prd_qty * pr.days_in_month, 0), 0) 
+        * pln.smg_prd_qty AS ir_che_prod_use_qt,
+    NVL(MAT.rmat_use_pln_qt / NULLIF(s.smg_prd_qty * pr.days_in_month, 0), 0) 
+        * 1000 AS rmat_std_ut_csum2,
+    (CASE 
+        WHEN NVL(MAT.im_ccon_rmat_iss_upri, 0) = 0
+        THEN p.im_ccon_rmat_iss_upri
+        ELSE MAT.im_ccon_rmat_iss_upri
+    END) * 1000 AS im_ccon_rmat_iss_upri,
+    ((CASE 
+        WHEN NVL(MAT.im_ccon_rmat_iss_upri, 0) = 0
+        THEN p.im_ccon_rmat_iss_upri
+        ELSE MAT.im_ccon_rmat_iss_upri
+    END) * 1000)
+        * NVL(MAT.rmat_use_pln_qt / NULLIF(s.smg_prd_qty * pr.days_in_month, 0), 0) 
+        AS item_cst_nor_amt,
+    SYSDATE AS created_at,
+    'R' AS actual_type,
+    CODE.seq
 FROM MAT
 CROSS JOIN params pr
 LEFT JOIN CODE
-  ON  MAT.ir_brand_cd      = CODE.item_brn_cd
-  AND MAT.category_segment4= CODE.category_segment4
+    ON MAT.ir_brand_cd = CODE.item_brn_cd
+    AND MAT.category_segment4 = CODE.category_segment4
 LEFT JOIN P
-  ON  MAT.category_segment4= P.category_segment4
-  AND MAT.ir_brand_cd      = P.item_brn_cd
-  AND p_works_code        = P.works_code
+    ON MAT.category_segment4 = P.category_segment4
+    AND MAT.ir_brand_cd = P.item_brn_cd
+    AND p_works_code = P.works_code
 LEFT JOIN PQ_keyed k
-  ON  k.month_cd           = MAT.month_cd
-  AND k.comm_apply_month   = MAT.comm_apply_month
-  AND k.resource_code      = MAT.resource_code
-  AND k.item_product_code_n= MAT.item_product_code_n
-  AND k.steel_grd_group    = MAT.steel_grd_group
+    ON k.month_cd = MAT.month_cd
+    AND k.comm_apply_month = MAT.comm_apply_month
+    AND k.resource_code = MAT.resource_code
+    AND k.item_product_code_n = MAT.item_product_code_n
+    AND k.steel_grd_group = MAT.steel_grd_group
 LEFT JOIN PQ_std s
-  ON  s.resource_code      = MAT.resource_code
-  AND s.item_product_code_n= MAT.item_product_code_n
-  AND s.steel_grd_group    = MAT.steel_grd_group
+    ON s.resource_code = MAT.resource_code
+    AND s.item_product_code_n = MAT.item_product_code_n
+    AND s.steel_grd_group = MAT.steel_grd_group
 LEFT JOIN PL pln
-  ON  pln.month_cd         = MAT.month_cd
-  AND pln.comm_apply_month = MAT.comm_apply_month
-  AND pln.resource_code    = MAT.resource_code
-  AND pln.item_product_code_n = MAT.item_product_code_n
-  AND pln.steel_grd_group  = MAT.steel_grd_group
+    ON pln.month_cd = MAT.month_cd
+    AND pln.comm_apply_month = MAT.comm_apply_month
+    AND pln.resource_code = MAT.resource_code
+    AND pln.item_product_code_n = MAT.item_product_code_n
+    AND pln.steel_grd_group = MAT.steel_grd_group
 WHERE MAT.comm_apply_month = v_STOCK_MONTH;
