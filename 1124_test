@@ -3,11 +3,10 @@
 """
 PostgreSQL to Oracle 프로시저 완전 자동 변환 도구
 입력: postgres.sql + ast.json
-출력: oracle.sql
+출력: oracle.sql (완전한 변환, 축약 없음)
 """
 
 import json
-import os
 import re
 import requests
 import time
@@ -30,13 +29,13 @@ LLM_API_KEY = "your-api-key-here"
 LLM_MODEL = "gpt-4.1"
 
 # LLM 호출 설정
-REQUEST_TIMEOUT = 120  # 타임아웃 (초)
+REQUEST_TIMEOUT = 180  # 타임아웃 (초)
 RETRY_COUNT = 3        # 실패 시 재시도 횟수
 DELAY_BETWEEN_CALLS = 2  # API 호출 간 대기 시간 (초)
 
 # 청크 분할 기준
-MAX_CHUNK_LINES = 300  # 일반 청크 최대 라인
-MAX_CTE_LINES = 500    # CTE는 더 길 수 있음
+MAX_CHUNK_LINES = 250  # 일반 청크 최대 라인
+WARN_CHUNK_LINES = 500  # 이 라인을 넘으면 경고
 
 # 로그 디렉토리
 LOG_DIR = "./conversion_logs"
@@ -76,18 +75,17 @@ def call_llm(user_message, system_message="당신은 PostgreSQL을 Oracle로 변
         )
         response.raise_for_status()
         
-        # 응답 텍스트 반환
         return response.text
         
     except requests.exceptions.RequestException as e:
-        print(f"  ⚠️  API 호출 실패: {e}")
+        print(f"  [WARNING] API 호출 실패: {e}")
         
         if retry < RETRY_COUNT:
-            print(f"  🔄 재시도 중... ({retry + 1}/{RETRY_COUNT})")
+            print(f"  [RETRY] 재시도 중... ({retry + 1}/{RETRY_COUNT})")
             time.sleep(DELAY_BETWEEN_CALLS * 2)
             return call_llm(user_message, system_message, retry + 1)
         else:
-            print(f"  ❌ 최대 재시도 횟수 초과")
+            print(f"  [ERROR] 최대 재시도 횟수 초과")
             return None
 
 # ============================================================================
@@ -97,55 +95,59 @@ def call_llm(user_message, system_message="당신은 PostgreSQL을 Oracle로 변
 def load_files():
     """SQL 파일과 AST 파일 로드"""
     
-    print("📂 파일 로딩 중...")
+    print("[INFO] 파일 로딩 중...")
     
-    # SQL 파일 읽기
     with open(SQL_FILE_PATH, 'r', encoding='utf-8') as f:
         sql_content = f.read()
         sql_lines = sql_content.split('\n')
     
-    # AST JSON 읽기
     with open(AST_JSON_PATH, 'r', encoding='utf-8') as f:
         ast_data = json.load(f)
     
-    print(f"  ✓ SQL 파일: {len(sql_lines)} 라인")
-    print(f"  ✓ AST 구조 로드 완료")
+    print(f"[INFO] SQL 파일: {len(sql_lines)} 라인")
+    print(f"[INFO] AST 구조 로드 완료")
     
     return sql_lines, ast_data
 
 # ============================================================================
-# AST 요약 (토큰 절약)
+# AST 구조를 간결하게 변환 (토큰 절약용)
 # ============================================================================
 
-def create_ast_summary(ast_data, max_depth=3, current_depth=0):
-    """AST를 요약하여 LLM 토큰 절약"""
+def simplify_ast_structure(node, depth=0, max_depth=4):
+    """AST를 간결하게 변환 (LLM 토큰 절약)"""
     
-    if current_depth >= max_depth:
-        return {"type": "...", "note": "생략"}
+    if depth >= max_depth:
+        return {"type": "...", "truncated": True}
     
-    if isinstance(ast_data, dict):
-        summary = {}
-        for key in ['type', 'startLine', 'endLine']:
-            if key in ast_data:
-                summary[key] = ast_data[key]
+    if isinstance(node, dict):
+        result = {}
         
-        if 'children' in ast_data and ast_data['children']:
-            children = ast_data['children']
-            if len(children) > 15:
-                summary['children'] = [
-                    create_ast_summary(children[0], max_depth, current_depth + 1),
-                    {"note": f"... {len(children)-2}개 생략 ..."},
-                    create_ast_summary(children[-1], max_depth, current_depth + 1)
+        # 필수 필드만 유지
+        for key in ['type', 'startLine', 'endLine']:
+            if key in node:
+                result[key] = node[key]
+        
+        # children 처리
+        if 'children' in node and node['children']:
+            children = node['children']
+            
+            # children이 많으면 샘플링
+            if len(children) > 20:
+                result['children'] = [
+                    simplify_ast_structure(children[0], depth + 1, max_depth),
+                    {"type": "...", "count": len(children) - 2, "truncated": True},
+                    simplify_ast_structure(children[-1], depth + 1, max_depth)
                 ]
+                result['total_children'] = len(children)
             else:
-                summary['children'] = [
-                    create_ast_summary(child, max_depth, current_depth + 1) 
+                result['children'] = [
+                    simplify_ast_structure(child, depth + 1, max_depth) 
                     for child in children
                 ]
         
-        return summary
+        return result
     
-    return ast_data
+    return node
 
 # ============================================================================
 # 1단계: AST 분석 및 청크 분할 전략
@@ -154,29 +156,28 @@ def create_ast_summary(ast_data, max_depth=3, current_depth=0):
 def analyze_and_chunk(sql_lines, ast_data):
     """LLM을 활용한 AST 분석 및 청크 분할"""
     
-    print("\n🔍 [1/4] AST 구조 분석 및 청크 분할 전략 수립 중...")
+    print("\n[STEP 1/3] AST 구조 분석 및 청크 분할 전략 수립 중...")
     
-    ast_summary = create_ast_summary(ast_data)
+    ast_simplified = simplify_ast_structure(ast_data)
     
     prompt = f"""
 다음은 PostgreSQL 프로시저의 AST 구조입니다:
 ```json
-{json.dumps(ast_summary, indent=2, ensure_ascii=False)}
+{json.dumps(ast_simplified, indent=2, ensure_ascii=False)}
 ```
 
 전체 라인 수: {len(sql_lines)}
 
 이 프로시저를 Oracle로 변환하기 위해 적절한 청크로 분할하려고 합니다.
 
-**분할 기준**:
-- 일반 섹션: 최대 {MAX_CHUNK_LINES} 라인
-- CTE/WITH 구문: 최대 {MAX_CTE_LINES} 라인 (길어도 괜찮음)
-- 논리적으로 독립적인 단위로 분할
-- SELECT, INSERT, UPDATE, DELETE는 가능하면 독립적으로
+**중요 규칙**:
+1. CTE (type이 "CTE"인 노드)는 라인 수와 관계없이 절대로 분할하지 말 것
+2. SELECT, INSERT, UPDATE, DELETE 같은 완전한 쿼리 블록은 분할하지 말 것
+3. 일반 섹션은 가능하면 {MAX_CHUNK_LINES} 라인 이하로 분할
+4. 하지만 논리적으로 완전한 단위를 유지하는 것이 최우선
+5. AST의 type 필드를 기준으로 논리적 경계를 판단할 것
 
-**중요**: 반드시 아래 JSON 형식으로만 출력하세요. 다른 설명이나 마크다운은 불필요합니다.
-
-출력 형식:
+**출력 형식** (반드시 JSON만 출력, 다른 텍스트 없이):
 {{
   "total_lines": {len(sql_lines)},
   "structure_summary": "프로시저 전체 구조 간략 요약",
@@ -190,7 +191,8 @@ def analyze_and_chunk(sql_lines, ast_data):
       "size_lines": 50,
       "priority": "HIGH",
       "description": "이 섹션 설명",
-      "conversion_notes": "변환 시 주의사항"
+      "conversion_notes": "변환 시 주의사항",
+      "is_cte": false
     }}
   ]
 }}
@@ -199,7 +201,7 @@ def analyze_and_chunk(sql_lines, ast_data):
     response = call_llm(prompt)
     
     if not response:
-        print("  ❌ AST 분석 실패")
+        print("[ERROR] AST 분석 실패")
         return None
     
     # JSON 추출
@@ -216,7 +218,16 @@ def analyze_and_chunk(sql_lines, ast_data):
             else:
                 analysis = json.loads(response)
         
-        print(f"  ✓ 분석 완료: {len(analysis['chunks'])}개 청크로 분할")
+        # 청크 크기 검증 및 경고
+        print(f"[INFO] 분석 완료: {len(analysis['chunks'])}개 청크로 분할")
+        
+        for chunk in analysis['chunks']:
+            size = chunk['size_lines']
+            if size > WARN_CHUNK_LINES:
+                print(f"[WARNING] 청크 {chunk['chunk_id']} '{chunk['name']}'의 크기가 {size} 라인으로 권장 크기({WARN_CHUNK_LINES})를 초과합니다.")
+                print(f"          AST Type: {chunk['ast_type']}, Lines: {chunk['start_line']}-{chunk['end_line']}")
+                if chunk.get('is_cte', False):
+                    print(f"          [INFO] CTE 블록이므로 분할하지 않음")
         
         # 로그 저장
         save_log("analysis_result.json", analysis)
@@ -224,8 +235,8 @@ def analyze_and_chunk(sql_lines, ast_data):
         return analysis
         
     except json.JSONDecodeError as e:
-        print(f"  ❌ JSON 파싱 실패: {e}")
-        print(f"  응답 내용:\n{response[:500]}...")
+        print(f"[ERROR] JSON 파싱 실패: {e}")
+        print(f"[DEBUG] 응답 내용:\n{response[:500]}...")
         save_log("analysis_error.txt", response)
         return None
 
@@ -236,7 +247,7 @@ def analyze_and_chunk(sql_lines, ast_data):
 def convert_chunk(chunk, sql_lines, chunk_number, total_chunks, context):
     """개별 청크를 Oracle로 변환"""
     
-    print(f"\n  🔄 [{chunk_number}/{total_chunks}] {chunk['name']} 변환 중...")
+    print(f"\n  [{chunk_number}/{total_chunks}] {chunk['name']} 변환 중...")
     print(f"     라인: {chunk['start_line']} ~ {chunk['end_line']} ({chunk['size_lines']} 라인)")
     
     # SQL 추출
@@ -260,46 +271,63 @@ PostgreSQL 프로시저의 일부를 Oracle 19c로 변환해주세요.
 {context}
 
 **주요 변환 규칙**:
-- COALESCE() → NVL() 또는 NVL2()
-- date_part(field, date) → EXTRACT(field FROM date)
-- substring(str, start, len) → SUBSTR(str, start, len)
-- now() → SYSDATE
-- PERFORM → SELECT INTO v_dummy FROM dual
-- RAISE NOTICE → DBMS_OUTPUT.PUT_LINE
-- VARCHAR → VARCHAR2
-- INTEGER → NUMBER
-- BOOLEAN → NUMBER(1)
-- string_agg() → LISTAGG()
-- array_agg() → LISTAGG() 또는 COLLECT()
-- CREATE OR REPLACE FUNCTION → CREATE OR REPLACE PROCEDURE (RETURNS void인 경우)
-- LANGUAGE plpgsql 제거
-- $$ ... $$ → BEGIN ... END; /
+1. 함수 변환:
+   - COALESCE() -> NVL() 또는 NVL2()
+   - date_part(field, date) -> EXTRACT(field FROM date)
+   - substring(str, start, len) -> SUBSTR(str, start, len)
+   - now() -> SYSDATE
+   - string_agg() -> LISTAGG()
+   - array_agg() -> LISTAGG() 또는 COLLECT()
+
+2. 타입 변환:
+   - VARCHAR -> VARCHAR2
+   - INTEGER -> NUMBER
+   - NUMERIC(n,m) -> NUMBER(n,m)
+   - BOOLEAN -> NUMBER(1)
+   - TIMESTAMP -> TIMESTAMP (동일하나 SYSTIMESTAMP 사용)
+
+3. 구조 변환:
+   - CREATE OR REPLACE FUNCTION -> CREATE OR REPLACE PROCEDURE (RETURNS void인 경우)
+   - RETURNS void 제거
+   - LANGUAGE plpgsql 제거
+   - $$ ... $$ -> BEGIN ... END;
+   - PERFORM -> SELECT INTO 변수 FROM dual
+   - RAISE NOTICE -> DBMS_OUTPUT.PUT_LINE
+   - refcursor -> SYS_REFCURSOR
+
+4. 기타:
+   - || (연결 연산자) -> || (동일)
+   - LIMIT -> ROWNUM 또는 FETCH FIRST
+   - OFFSET -> ROW_NUMBER() OVER()
 
 **변환할 PostgreSQL 코드**:
 ```sql
 {sql_content}
 ```
 
-**중요**: 
+**중요 지침**:
 1. 변환된 Oracle 코드만 출력하세요
-2. 코드 블록(```)이나 "여기 변환된 코드입니다" 같은 설명은 불필요합니다
+2. 코드 블록 마커(```)나 설명 텍스트는 불필요합니다
 3. 오직 실행 가능한 Oracle SQL 코드만 출력하세요
-4. 주석으로 주요 변경사항을 간단히 표시하세요
+4. 원본의 모든 로직을 빠짐없이 변환하세요
+5. 주석으로 주요 변경사항을 표시할 수 있습니다
+6. 한 글자도 생략하거나 축약하지 마세요
 """
 
     response = call_llm(prompt)
     
     if not response:
-        print(f"     ❌ 변환 실패")
+        print(f"     [ERROR] 변환 실패")
         return None
     
-    # 코드 블록 제거 (```sql ... ``` 또는 ``` ... ```)
+    # 코드 블록 제거
     oracle_code = response.strip()
-    oracle_code = re.sub(r'^```sql\s*', '', oracle_code)
-    oracle_code = re.sub(r'^```\s*', '', oracle_code)
-    oracle_code = re.sub(r'\s*```$', '', oracle_code)
+    oracle_code = re.sub(r'^```sql\s*\n?', '', oracle_code)
+    oracle_code = re.sub(r'^```\s*\n?', '', oracle_code)
+    oracle_code = re.sub(r'\n?```$', '', oracle_code)
+    oracle_code = oracle_code.strip()
     
-    print(f"     ✓ 변환 완료 ({len(oracle_code)} 문자)")
+    print(f"     [INFO] 변환 완료 ({len(oracle_code)} 문자)")
     
     # 로그 저장
     save_log(f"chunk_{chunk['chunk_id']:03d}_original.sql", sql_content)
@@ -313,7 +341,7 @@ PostgreSQL 프로시저의 일부를 Oracle 19c로 변환해주세요.
 def convert_all_chunks(chunks, sql_lines, context):
     """모든 청크를 변환"""
     
-    print("\n🔄 [2/4] 청크별 Oracle 변환 중...")
+    print("\n[STEP 2/3] 청크별 Oracle 변환 중...")
     
     converted_chunks = []
     total = len(chunks)
@@ -330,9 +358,18 @@ def convert_all_chunks(chunks, sql_lines, context):
                 'oracle_code': converted
             })
         else:
-            print(f"  ⚠️  청크 {chunk['chunk_id']} 변환 실패, 건너뜀")
+            print(f"  [ERROR] 청크 {chunk['chunk_id']} 변환 실패")
+            # 변환 실패한 청크는 원본을 그대로 넣고 주석 처리
+            original_sql = '\n'.join(sql_lines[chunk['start_line']-1:chunk['end_line']])
+            converted_chunks.append({
+                'chunk_id': chunk['chunk_id'],
+                'name': chunk['name'],
+                'start_line': chunk['start_line'],
+                'end_line': chunk['end_line'],
+                'oracle_code': f"-- [ERROR] 변환 실패 - 원본 PostgreSQL 코드:\n-- {original_sql.replace(chr(10), chr(10) + '-- ')}"
+            })
     
-    print(f"\n  ✓ {len(converted_chunks)}/{total} 청크 변환 완료")
+    print(f"\n[INFO] {len([c for c in converted_chunks if '[ERROR]' not in c['oracle_code']])}/{total} 청크 변환 완료")
     
     return converted_chunks
 
@@ -343,7 +380,7 @@ def convert_all_chunks(chunks, sql_lines, context):
 def merge_chunks(converted_chunks, analysis):
     """변환된 청크들을 하나의 Oracle 프로시저로 병합"""
     
-    print("\n🔗 [3/4] 변환된 청크 병합 중...")
+    print("\n[STEP 3/3] 변환된 청크 병합 중...")
     
     # 청크 ID 순으로 정렬
     converted_chunks.sort(key=lambda x: x['chunk_id'])
@@ -353,7 +390,7 @@ def merge_chunks(converted_chunks, analysis):
     # 헤더 추가
     merged_sql.append("-- ============================================================================")
     merged_sql.append("-- PostgreSQL to Oracle 자동 변환 결과")
-    merged_sql.append(f"-- 원본: {SQL_FILE_PATH}")
+    merged_sql.append(f"-- 원본 파일: {SQL_FILE_PATH}")
     merged_sql.append(f"-- 변환 일시: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     merged_sql.append(f"-- 총 청크 수: {len(converted_chunks)}")
     merged_sql.append("-- ============================================================================")
@@ -361,61 +398,17 @@ def merge_chunks(converted_chunks, analysis):
     
     # 각 청크 병합
     for chunk in converted_chunks:
-        merged_sql.append(f"-- Chunk {chunk['chunk_id']}: {chunk['name']}")
+        merged_sql.append(f"-- [Chunk {chunk['chunk_id']}] {chunk['name']}")
         merged_sql.append(f"-- Original lines: {chunk['start_line']} - {chunk['end_line']}")
-        merged_sql.append("-" * 80)
+        merged_sql.append("-- " + "-" * 76)
         merged_sql.append(chunk['oracle_code'])
         merged_sql.append("")
     
     result = '\n'.join(merged_sql)
     
-    print(f"  ✓ 병합 완료 ({len(result)} 문자)")
+    print(f"[INFO] 병합 완료 ({len(result)} 문자)")
     
     return result
-
-# ============================================================================
-# 4단계: 최종 정리 및 검증
-# ============================================================================
-
-def finalize_and_validate(merged_sql):
-    """최종 SQL 정리 및 기본 검증"""
-    
-    print("\n✨ [4/4] 최종 정리 및 검증 중...")
-    
-    # LLM에게 최종 검토 요청
-    prompt = f"""
-다음은 PostgreSQL에서 Oracle로 자동 변환된 프로시저입니다.
-
-**검토 요청사항**:
-1. 전체적인 구조가 올바른지 확인
-2. 누락된 변환이 있는지 확인
-3. 문법 오류가 있는지 확인
-4. 필요한 수정사항을 적용
-
-**변환된 코드**:
-```sql
-{merged_sql[:10000]}  # 처음 10000자만 (너무 길면 잘림)
-...
-```
-
-**출력 형식**:
-1. 검토 결과를 간단히 요약
-2. 수정이 필요한 부분이 있다면 수정된 전체 코드 출력
-3. 수정이 필요없다면 "검증 완료. 수정 불필요"라고만 출력
-"""
-
-    print("  🔍 LLM 최종 검증 중...")
-    response = call_llm(prompt)
-    
-    if response and "수정 불필요" not in response:
-        # 코드 블록 추출 시도
-        code_match = re.search(r'```sql\s*(.*?)\s*```', response, re.DOTALL)
-        if code_match:
-            print("  ✓ 최종 수정 사항 적용됨")
-            return code_match.group(1)
-    
-    print("  ✓ 검증 완료")
-    return merged_sql
 
 # ============================================================================
 # 로그 저장
@@ -443,9 +436,9 @@ def save_log(filename, content):
 def main():
     """메인 실행 함수"""
     
-    print("\n" + "="*80)
-    print("🚀 PostgreSQL to Oracle 완전 자동 변환 시스템")
-    print("="*80 + "\n")
+    print("=" * 80)
+    print("PostgreSQL to Oracle 완전 자동 변환 시스템")
+    print("=" * 80 + "\n")
     
     start_time = time.time()
     
@@ -456,7 +449,7 @@ def main():
         # 2. AST 분석 및 청크 분할
         analysis = analyze_and_chunk(sql_lines, ast_data)
         if not analysis:
-            print("\n❌ 분석 실패. 프로그램을 종료합니다.")
+            print("\n[ERROR] 분석 실패. 프로그램을 종료합니다.")
             return
         
         context = analysis['structure_summary']
@@ -465,37 +458,34 @@ def main():
         converted_chunks = convert_all_chunks(analysis['chunks'], sql_lines, context)
         
         if not converted_chunks:
-            print("\n❌ 변환된 청크가 없습니다. 프로그램을 종료합니다.")
+            print("\n[ERROR] 변환된 청크가 없습니다. 프로그램을 종료합니다.")
             return
         
         # 4. 청크 병합
-        merged_sql = merge_chunks(converted_chunks, analysis)
+        final_sql = merge_chunks(converted_chunks, analysis)
         
-        # 5. 최종 정리 및 검증
-        final_sql = finalize_and_validate(merged_sql)
-        
-        # 6. 최종 파일 저장
+        # 5. 최종 파일 저장
         with open(OUTPUT_SQL_FILE, 'w', encoding='utf-8') as f:
             f.write(final_sql)
         
         elapsed_time = time.time() - start_time
         
-        print("\n" + "="*80)
-        print("✅ 변환 완료!")
-        print("="*80)
-        print(f"\n📄 출력 파일: {OUTPUT_SQL_FILE}")
-        print(f"📊 변환 통계:")
-        print(f"   - 원본 라인 수: {len(sql_lines)}")
-        print(f"   - 총 청크 수: {len(analysis['chunks'])}")
-        print(f"   - 변환된 청크: {len(converted_chunks)}")
-        print(f"   - 소요 시간: {elapsed_time:.1f}초")
-        print(f"\n📁 로그 디렉토리: {LOG_DIR}/")
-        print(f"   - 각 청크별 변환 전/후 파일 저장됨")
-        print(f"   - 분석 결과: analysis_result.json")
-        print("\n⚠️  변환된 SQL을 실행하기 전에 반드시 검토하세요!\n")
+        print("\n" + "=" * 80)
+        print("변환 완료")
+        print("=" * 80)
+        print(f"\n출력 파일: {OUTPUT_SQL_FILE}")
+        print(f"변환 통계:")
+        print(f"  - 원본 라인 수: {len(sql_lines)}")
+        print(f"  - 총 청크 수: {len(analysis['chunks'])}")
+        print(f"  - 변환 성공: {len([c for c in converted_chunks if '[ERROR]' not in c['oracle_code']])}")
+        print(f"  - 소요 시간: {elapsed_time:.1f}초")
+        print(f"\n로그 디렉토리: {LOG_DIR}/")
+        print(f"  - 각 청크별 변환 전/후 파일 저장됨")
+        print(f"  - 분석 결과: analysis_result.json")
+        print(f"\n[WARNING] 변환된 SQL을 실행하기 전에 반드시 검토하세요\n")
         
     except Exception as e:
-        print(f"\n❌ 오류 발생: {e}")
+        print(f"\n[ERROR] 오류 발생: {e}")
         import traceback
         traceback.print_exc()
         save_log("error.txt", traceback.format_exc())
