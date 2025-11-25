@@ -1,493 +1,541 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-PostgreSQL to Oracle 프로시저 완전 자동 변환 도구
-입력: postgres.sql + ast.json
-출력: oracle.sql (완전한 변환, 축약 없음)
+PostgreSQL to Oracle Procedure Converter
+AST 기반 청크 분할 및 LLM 변환 스크립트
 """
 
 import json
-import re
-import requests
+import os
 import time
+import asyncio
+import aiohttp
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
 from pathlib import Path
+import logging
 
 # ============================================================================
-# 설정 (여기를 수정하세요)
+# 설정
 # ============================================================================
-
-# 입력 파일 경로
 SQL_FILE_PATH = "./postgres_procedure.sql"
 AST_JSON_PATH = "./procedure_ast.json"
-
-# 출력 파일 경로
 OUTPUT_SQL_FILE = "./oracle_procedure.sql"
-
-# LLM API 설정
-LLM_API_URL = "https://your-company-api.com/v1/chat/completions"
-LLM_API_KEY = "your-api-key-here"
-LLM_MODEL = "gpt-4.1"
-
-# LLM 호출 설정
-REQUEST_TIMEOUT = 180
-RETRY_COUNT = 3
-DELAY_BETWEEN_CALLS = 2
-
-# 청크 분할 기준
-WARN_CHUNK_LINES = 500
-
-# 로그 디렉토리
 LOG_DIR = "./conversion_logs"
 
-# ============================================================================
-# LLM 호출 함수
-# ============================================================================
+LLM_API_URL = "https://company-url.com/api/chat"
+LLM_API_KEY = "api-key"
+LLM_MODEL = "gpt-4.1"
 
-def call_llm(user_message, system_message="당신은 PostgreSQL을 Oracle로 변환하는 전문가입니다.", retry=0):
-    """LLM API 호출 (재시도 로직 포함)"""
+# 설정 상수
+MAX_RETRIES = 3
+REQUEST_TIMEOUT = 180
+REQUEST_DELAY = 2  # 초
+MAX_CHUNK_LINES = 500
+MAX_CONCURRENT_REQUESTS = 5  # 동시 요청 수
+
+# ============================================================================
+# 로깅 설정
+# ============================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(f'{LOG_DIR}/conversion.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# ============================================================================
+# 데이터 클래스
+# ============================================================================
+@dataclass
+class Chunk:
+    """변환할 청크 정보"""
+    chunk_id: int
+    node_type: str
+    start_line: int
+    end_line: int
+    content: str
+    parent_context: str
+    is_leaf: bool
     
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": LLM_API_KEY
-    }
-    
-    payload = {
-        "messages": [
-            {
-                "role": "system",
-                "content": system_message
-            },
-            {
-                "role": "user",
-                "content": user_message
-            }
-        ],
-        "model": LLM_MODEL
-    }
-    
+    def line_count(self) -> int:
+        return self.end_line - self.start_line + 1
+
+
+@dataclass
+class TreeNode:
+    """트리 구조 노드"""
+    node_type: str
+    start_line: int
+    end_line: int
+    parent_context: str
+    prefix: Optional[str] = None
+    suffix: Optional[str] = None
+    children: Optional[List['TreeNode']] = None
+    converted_prefix: Optional[str] = None
+    converted_suffix: Optional[str] = None
+    converted_content: Optional[str] = None  # 리프 노드용
+    is_leaf: bool = False
+
+
+# ============================================================================
+# SQL 파일 로드
+# ============================================================================
+def load_sql_file(file_path: str) -> List[str]:
+    """SQL 파일을 라인 배열로 로드"""
     try:
-        response = requests.post(
-            LLM_API_URL, 
-            headers=headers, 
-            json=payload, 
-            timeout=REQUEST_TIMEOUT
-        )
-        response.raise_for_status()
-        
-        return response.text
-        
-    except requests.exceptions.RequestException as e:
-        print(f"  [WARNING] API 호출 실패: {e}")
-        
-        if retry < RETRY_COUNT:
-            print(f"  [RETRY] 재시도 중... ({retry + 1}/{RETRY_COUNT})")
-            time.sleep(DELAY_BETWEEN_CALLS * 2)
-            return call_llm(user_message, system_message, retry + 1)
-        else:
-            print(f"  [ERROR] 최대 재시도 횟수 초과")
-            return None
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        logger.info(f"SQL 파일 로드 완료: {len(lines)} 라인")
+        return lines
+    except Exception as e:
+        logger.error(f"SQL 파일 로드 실패: {e}")
+        raise
+
+
+def load_ast_json(file_path: str) -> Dict[str, Any]:
+    """AST JSON 파일 로드"""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            ast = json.load(f)
+        logger.info(f"AST JSON 로드 완료")
+        return ast
+    except Exception as e:
+        logger.error(f"AST JSON 로드 실패: {e}")
+        raise
+
 
 # ============================================================================
-# 파일 로드
+# 청크 추출 (AST 재귀 순회)
 # ============================================================================
+def extract_lines(sql_lines: List[str], start_line: int, end_line: int) -> str:
+    """지정된 라인 범위의 SQL 추출 (1-based index)"""
+    if start_line > end_line or start_line < 1:
+        return ""
+    return ''.join(sql_lines[start_line-1:end_line])
 
-def load_files():
-    """SQL 파일과 AST 파일 로드"""
-    
-    print("[INFO] 파일 로딩 중...")
-    
-    with open(SQL_FILE_PATH, 'r', encoding='utf-8') as f:
-        sql_content = f.read()
-        sql_lines = sql_content.split('\n')
-    
-    with open(AST_JSON_PATH, 'r', encoding='utf-8') as f:
-        ast_data = json.load(f)
-    
-    print(f"[INFO] SQL 파일: {len(sql_lines)} 라인")
-    print(f"[INFO] AST 구조 로드 완료")
-    
-    return sql_lines, ast_data
 
-# ============================================================================
-# AST 청크 추출 (리프 노드까지 재귀)
-# ============================================================================
-
-def extract_chunks_from_ast(node, chunks, chunk_id_counter, parent_context=None, depth=0):
+def build_tree_structure(
+    node: Dict[str, Any],
+    sql_lines: List[str],
+    parent_context: str = ""
+) -> TreeNode:
     """
-    AST를 재귀 순회하며 청크 추출
-    - children이 없는 노드 = 리프 노드 = 완전한 청크
-    - children이 있는 노드 = 계속 들어가기
+    AST를 재귀적으로 순회하여 트리 구조 구축
+    절대 원칙: children이 있는 노드는 무조건 리프 노드까지 재귀 탐색
     """
-    
-    if not isinstance(node, dict):
-        return chunk_id_counter
-    
     node_type = node.get('type', 'UNKNOWN')
-    start_line = node.get('startLine', 0)
-    end_line = node.get('endLine', 0)
-    line_count = end_line - start_line + 1 if end_line > 0 else 0
+    start_line = node.get('startLine', 1)
+    end_line = node.get('endLine', 1)
     children = node.get('children', [])
     
-    # 현재 노드의 컨텍스트 정보 생성
-    current_context = {
-        'type': node_type,
-        'start_line': start_line,
-        'end_line': end_line,
-        'parent': parent_context
-    }
+    # 현재 컨텍스트 경로
+    current_context = f"{parent_context} > {node_type}" if parent_context else node_type
     
-    # children이 없으면 = 리프 노드 = 청크로 추가
+    tree_node = TreeNode(
+        node_type=node_type,
+        start_line=start_line,
+        end_line=end_line,
+        parent_context=current_context
+    )
+    
+    # children이 없으면 리프 노드
     if not children:
-        if line_count > 0:
-            chunk_id_counter[0] += 1
-            
-            # 부모 컨텍스트 경로 생성
-            context_path = []
-            ctx = parent_context
-            while ctx:
-                context_path.insert(0, f"{ctx['type']}({ctx['start_line']}-{ctx['end_line']})")
-                ctx = ctx.get('parent')
-            
-            context_str = ' > '.join(context_path) if context_path else 'ROOT'
-            
-            chunks.append({
-                'chunk_id': chunk_id_counter[0],
-                'name': f'{node_type}_{chunk_id_counter[0]}',
-                'ast_type': node_type,
-                'start_line': start_line,
-                'end_line': end_line,
-                'size_lines': line_count,
-                'priority': 'HIGH' if node_type in ['CTE', 'SELECT', 'INSERT', 'UPDATE', 'DELETE'] else 'MEDIUM',
-                'description': f'{node_type} 블록',
-                'conversion_notes': f'{node_type} 처리',
-                'parent_context': context_str
-            })
-            
-            if line_count > WARN_CHUNK_LINES:
-                print(f"[WARNING] 청크 {chunk_id_counter[0]} '{node_type}' ({line_count} 라인) - 큰 리프 노드")
-                print(f"          경로: {context_str}")
-        
-        return chunk_id_counter
+        tree_node.is_leaf = True
+        tree_node.converted_content = extract_lines(sql_lines, start_line, end_line)
+        return tree_node
     
-    # children이 있으면 = 컨테이너 노드 = 재귀적으로 children 처리
-    else:
-        if depth == 0:
-            print(f"[INFO] {node_type} 노드 ({line_count} 라인) - {len(children)}개 children 순회 시작")
+    # children이 있으면 컨테이너 노드 - 반드시 재귀 탐색
+    tree_node.is_leaf = False
+    tree_node.children = []
+    
+    # PREFIX 추출: 부모 시작 ~ 첫 자식 시작-1
+    first_child_start = children[0].get('startLine', start_line)
+    if first_child_start > start_line:
+        tree_node.prefix = extract_lines(sql_lines, start_line, first_child_start - 1)
+    
+    # 모든 자식 재귀 처리 (절대 원칙!)
+    for child in children:
+        child_tree = build_tree_structure(child, sql_lines, current_context)
+        tree_node.children.append(child_tree)
+    
+    # SUFFIX 추출: 마지막 자식 끝+1 ~ 부모 끝
+    last_child_end = children[-1].get('endLine', end_line)
+    if last_child_end < end_line:
+        tree_node.suffix = extract_lines(sql_lines, last_child_end + 1, end_line)
+    
+    return tree_node
+
+
+def collect_leaf_chunks(tree_node: TreeNode, chunks: List[Chunk], chunk_id_counter: List[int]):
+    """트리에서 모든 리프 노드(청크)를 수집"""
+    if tree_node.is_leaf:
+        # 리프 노드 = 청크
+        chunk = Chunk(
+            chunk_id=chunk_id_counter[0],
+            node_type=tree_node.node_type,
+            start_line=tree_node.start_line,
+            end_line=tree_node.end_line,
+            content=tree_node.converted_content,
+            parent_context=tree_node.parent_context,
+            is_leaf=True
+        )
+        chunks.append(chunk)
+        chunk_id_counter[0] += 1
         
-        for child in children:
-            chunk_id_counter = extract_chunks_from_ast(
-                child, 
-                chunks, 
-                chunk_id_counter, 
-                current_context, 
-                depth + 1
+        # 500 라인 초과 경고
+        if chunk.line_count() > MAX_CHUNK_LINES:
+            logger.warning(
+                f"청크 {chunk.chunk_id} 라인 수 초과: {chunk.line_count()} 라인 "
+                f"({chunk.start_line}-{chunk.end_line})"
             )
+    else:
+        # PREFIX도 변환 대상
+        if tree_node.prefix:
+            chunk = Chunk(
+                chunk_id=chunk_id_counter[0],
+                node_type=f"{tree_node.node_type}_PREFIX",
+                start_line=tree_node.start_line,
+                end_line=tree_node.children[0].start_line - 1 if tree_node.children else tree_node.start_line,
+                content=tree_node.prefix,
+                parent_context=tree_node.parent_context,
+                is_leaf=False
+            )
+            chunks.append(chunk)
+            chunk_id_counter[0] += 1
         
-        return chunk_id_counter
+        # 자식 재귀
+        if tree_node.children:
+            for child in tree_node.children:
+                collect_leaf_chunks(child, chunks, chunk_id_counter)
+        
+        # SUFFIX도 변환 대상
+        if tree_node.suffix:
+            chunk = Chunk(
+                chunk_id=chunk_id_counter[0],
+                node_type=f"{tree_node.node_type}_SUFFIX",
+                start_line=tree_node.children[-1].end_line + 1 if tree_node.children else tree_node.end_line,
+                end_line=tree_node.end_line,
+                content=tree_node.suffix,
+                parent_context=tree_node.parent_context,
+                is_leaf=False
+            )
+            chunks.append(chunk)
+            chunk_id_counter[0] += 1
 
-def analyze_and_chunk_direct(sql_lines, ast_data):
-    """Python에서 직접 AST를 분석하여 청크 생성"""
-    
-    print("\n[STEP 1/3] AST 구조 분석 및 청크 분할 중...")
-    print("[INFO] children이 있는 노드는 리프까지 재귀 탐색")
-    
-    chunks = []
-    chunk_id_counter = [0]
-    
-    extract_chunks_from_ast(ast_data, chunks, chunk_id_counter)
-    
-    # 청크 정렬 (라인 순서대로)
-    chunks.sort(key=lambda x: x['start_line'])
-    
-    # chunk_id 재할당
-    for i, chunk in enumerate(chunks, 1):
-        chunk['chunk_id'] = i
-    
-    print(f"\n[INFO] 분석 완료: {len(chunks)}개 청크로 분할")
-    
-    # 통계 출력
-    large_chunks = [c for c in chunks if c['size_lines'] > WARN_CHUNK_LINES]
-    if large_chunks:
-        print(f"[WARNING] {len(large_chunks)}개의 큰 청크 (500 라인 초과) 발견")
-        for chunk in large_chunks:
-            print(f"  - 청크 {chunk['chunk_id']}: {chunk['ast_type']} ({chunk['size_lines']} 라인)")
-    
-    # 분석 결과 저장
-    analysis = {
-        'total_lines': len(sql_lines),
-        'structure_summary': f'{len(chunks)}개 청크로 분할됨 (리프 노드 기준)',
-        'chunks': chunks
-    }
-    
-    save_log("analysis_result.json", analysis)
-    
-    return analysis
 
 # ============================================================================
-# 청크별 변환
+# LLM 변환
 # ============================================================================
+def create_conversion_prompt(chunk: Chunk) -> str:
+    """변환 프롬프트 생성"""
+    return f"""당신은 PostgreSQL을 Oracle 19c로 변환하는 전문가입니다.
 
-def convert_chunk(chunk, sql_lines, chunk_number, total_chunks):
-    """개별 청크를 Oracle로 변환"""
-    
-    print(f"\n  [{chunk_number}/{total_chunks}] {chunk['name']} 변환 중...")
-    print(f"     라인: {chunk['start_line']} ~ {chunk['end_line']} ({chunk['size_lines']} 라인)")
-    
-    # SQL 추출
-    start = chunk['start_line']
-    end = chunk['end_line']
-    sql_content = '\n'.join(sql_lines[start-1:end])
-    
-    # 부모 컨텍스트 정보
-    context_info = f"부모 경로: {chunk['parent_context']}" if chunk.get('parent_context') else "최상위 노드"
-    
-    # 변환 프롬프트 생성
-    prompt = f"""
-PostgreSQL 프로시저의 일부를 Oracle 19c로 변환해주세요.
+다음 PostgreSQL 코드를 Oracle 19c로 변환하세요.
 
-**청크 정보**:
-- 청크 ID: {chunk['chunk_id']}/{total_chunks}
-- AST 타입: {chunk['ast_type']}
-- 라인 범위: {chunk['start_line']} ~ {chunk['end_line']} ({chunk['size_lines']} 라인)
-- {context_info}
+**컨텍스트 경로:** {chunk.parent_context}
+**노드 타입:** {chunk.node_type}
+**라인 범위:** {chunk.start_line}-{chunk.end_line}
 
-**주요 변환 규칙**:
+**변환 규칙:**
 
-1. 함수 변환:
-   - COALESCE() -> NVL()
-   - date_part(field, date) -> EXTRACT(field FROM date)
-   - substring(str, start, len) -> SUBSTR(str, start, len)
-   - now() -> SYSDATE
-   - current_timestamp -> SYSTIMESTAMP
-   - string_agg() -> LISTAGG()
-   - array_agg() -> LISTAGG()
-   - date_trunc() -> TRUNC()
-   - to_char() -> TO_CHAR() (동일)
-   - to_date() -> TO_DATE() (동일)
+함수 변환:
+- COALESCE() → NVL()
+- date_part(field, date) → EXTRACT(field FROM date)
+- substring() → SUBSTR()
+- now() → SYSDATE
+- string_agg() → LISTAGG()
 
-2. 타입 변환:
-   - VARCHAR -> VARCHAR2
-   - INTEGER -> NUMBER
-   - NUMERIC(n,m) -> NUMBER(n,m)
-   - BOOLEAN -> NUMBER(1)
-   - TIMESTAMP -> TIMESTAMP
-   - refcursor -> SYS_REFCURSOR
-   - SERIAL -> NUMBER + SEQUENCE
+타입 변환:
+- VARCHAR → VARCHAR2
+- INTEGER → NUMBER
+- BOOLEAN → NUMBER(1)
+- refcursor → SYS_REFCURSOR
 
-3. 구조 변환:
-   - CREATE OR REPLACE FUNCTION -> CREATE OR REPLACE PROCEDURE (RETURNS void인 경우)
-   - RETURNS void 제거
-   - LANGUAGE plpgsql 제거
-   - $$ -> AS 또는 IS
-   - END $$ -> END; /
-   - PERFORM -> SELECT INTO v_dummy FROM dual
-   - RAISE NOTICE -> DBMS_OUTPUT.PUT_LINE
-   - RAISE EXCEPTION -> RAISE_APPLICATION_ERROR
-   - CREATE TEMP TABLE -> TRUNCATE TABLE (글로벌 임시 테이블 사전 생성 필요)
-   - DROP TABLE IF EXISTS -> EXECUTE IMMEDIATE 'DROP TABLE...' with EXCEPTION WHEN OTHERS THEN NULL
+구조 변환:
+- CREATE FUNCTION → CREATE PROCEDURE (RETURNS void인 경우)
+- $$ → AS, END $$ → END; /
+- PERFORM → SELECT INTO v_dummy FROM dual
+- RAISE NOTICE → DBMS_OUTPUT.PUT_LINE
+- CREATE TEMP TABLE → TRUNCATE TABLE
 
-4. 제어 구조:
-   - FOR ... IN ... LOOP -> FOR ... IN ... LOOP (동일)
-   - WHILE ... LOOP -> WHILE ... LOOP (동일)
-   - IF ... THEN ... ELSIF ... ELSE ... END IF -> 동일
-   - EXIT WHEN -> EXIT WHEN (동일)
-   - CONTINUE -> CONTINUE (동일)
+**중요 제약사항:**
+1. 축약, 생략, 요약 절대 금지 - 모든 로직을 빠짐없이 변환
+2. SQL은 한 글자만 달라져도 오류 발생 - 정확하게 변환
+3. 코드 블록 마커(```)를 사용하지 말고 순수 SQL만 출력
+4. 주석이나 설명 없이 변환된 SQL 코드만 출력
 
-5. 기타:
-   - || (문자열 연결) -> || (동일)
-   - LIMIT n -> FETCH FIRST n ROWS ONLY
-   - OFFSET n -> ROW_NUMBER() OVER() 사용
-   - RETURNING -> RETURNING INTO (Oracle)
-   - := (할당) -> := (동일)
-
-**변환할 PostgreSQL 코드**:
+**PostgreSQL 코드:**
 ```sql
-{sql_content}
+{chunk.content}
 ```
 
-**매우 중요**:
-1. 변환된 Oracle 코드만 출력하세요
-2. 코드 블록 마커(```)나 설명 텍스트 없이 순수 SQL만
-3. 원본의 모든 로직을 빠짐없이 변환
-4. 한 줄도 생략하거나 축약하지 마세요
-5. 주석은 유지하되 필요시 변환 관련 주석 추가 가능
-"""
+**변환된 Oracle 코드를 출력하세요:**"""
 
-    response = call_llm(prompt)
-    
-    if not response:
-        print(f"     [ERROR] 변환 실패")
-        return None
-    
-    # 코드 블록 제거
-    oracle_code = response.strip()
-    oracle_code = re.sub(r'^```sql\s*\n?', '', oracle_code)
-    oracle_code = re.sub(r'^```\s*\n?', '', oracle_code)
-    oracle_code = re.sub(r'\n?```$', '', oracle_code)
-    oracle_code = oracle_code.strip()
-    
-    print(f"     [INFO] 변환 완료 ({len(oracle_code)} 문자)")
-    
-    # 로그 저장
-    save_log(f"chunk_{chunk['chunk_id']:03d}_original.sql", sql_content)
-    save_log(f"chunk_{chunk['chunk_id']:03d}_converted.sql", oracle_code)
-    
-    # API 호출 간 대기
-    time.sleep(DELAY_BETWEEN_CALLS)
-    
-    return oracle_code
 
-def convert_all_chunks(chunks, sql_lines):
-    """모든 청크를 변환"""
-    
-    print("\n[STEP 2/3] 청크별 Oracle 변환 중...")
-    
-    converted_chunks = []
-    total = len(chunks)
-    
-    for i, chunk in enumerate(chunks, 1):
-        converted = convert_chunk(chunk, sql_lines, i, total)
+async def convert_chunk_with_llm(
+    session: aiohttp.ClientSession,
+    chunk: Chunk,
+    semaphore: asyncio.Semaphore
+) -> tuple[Chunk, str]:
+    """LLM API를 호출하여 청크 변환 (비동기)"""
+    async with semaphore:
+        system_message = "당신은 PostgreSQL을 Oracle 19c로 변환하는 전문가입니다. 정확하고 완전한 변환을 수행하세요."
+        user_message = create_conversion_prompt(chunk)
         
-        if converted:
-            converted_chunks.append({
-                'chunk_id': chunk['chunk_id'],
-                'name': chunk['name'],
-                'start_line': chunk['start_line'],
-                'end_line': chunk['end_line'],
-                'parent_context': chunk.get('parent_context', ''),
-                'oracle_code': converted
-            })
-        else:
-            print(f"  [ERROR] 청크 {chunk['chunk_id']} 변환 실패")
-            original_sql = '\n'.join(sql_lines[chunk['start_line']-1:chunk['end_line']])
-            converted_chunks.append({
-                'chunk_id': chunk['chunk_id'],
-                'name': chunk['name'],
-                'start_line': chunk['start_line'],
-                'end_line': chunk['end_line'],
-                'parent_context': chunk.get('parent_context', ''),
-                'oracle_code': f"-- [ERROR] 변환 실패\n-- {original_sql.replace(chr(10), chr(10) + '-- ')}"
-            })
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
+            ],
+            "model": LLM_MODEL
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {LLM_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        for attempt in range(MAX_RETRIES):
+            try:
+                logger.info(f"청크 {chunk.chunk_id} 변환 시도 {attempt + 1}/{MAX_RETRIES}")
+                
+                async with session.post(
+                    LLM_API_URL,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+                ) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    
+                    # 응답에서 텍스트 추출 (API 형식에 따라 조정 필요)
+                    converted = result.get('text', '') or result.get('content', '') or result.get('message', '')
+                    
+                    # 코드 블록 마커 제거
+                    converted = converted.replace('```sql', '').replace('```', '').strip()
+                    
+                    logger.info(f"청크 {chunk.chunk_id} 변환 완료")
+                    
+                    # 딜레이
+                    await asyncio.sleep(REQUEST_DELAY)
+                    
+                    return chunk, converted
+                    
+            except asyncio.TimeoutError:
+                logger.warning(f"청크 {chunk.chunk_id} 타임아웃 (시도 {attempt + 1})")
+                if attempt == MAX_RETRIES - 1:
+                    raise
+                await asyncio.sleep(REQUEST_DELAY * 2)
+                
+            except Exception as e:
+                logger.error(f"청크 {chunk.chunk_id} 변환 실패 (시도 {attempt + 1}): {e}")
+                if attempt == MAX_RETRIES - 1:
+                    raise
+                await asyncio.sleep(REQUEST_DELAY * 2)
+        
+        raise Exception(f"청크 {chunk.chunk_id} 변환 최종 실패")
+
+
+async def convert_all_chunks(chunks: List[Chunk]) -> Dict[int, str]:
+    """모든 청크를 병렬로 변환"""
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    converted_chunks = {}
     
-    success_count = len([c for c in converted_chunks if '[ERROR]' not in c['oracle_code']])
-    print(f"\n[INFO] {success_count}/{total} 청크 변환 완료")
+    async with aiohttp.ClientSession() as session:
+        tasks = [convert_chunk_with_llm(session, chunk, semaphore) for chunk in chunks]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"변환 실패: {result}")
+                continue
+            
+            chunk, converted = result
+            converted_chunks[chunk.chunk_id] = converted
+            
+            # 로그 저장
+            save_chunk_log(chunk, converted)
     
     return converted_chunks
 
-# ============================================================================
-# 청크 병합
-# ============================================================================
 
-def merge_chunks(converted_chunks, analysis):
-    """변환된 청크들을 하나의 Oracle 프로시저로 병합"""
+def save_chunk_log(chunk: Chunk, converted: str):
+    """청크별 로그 저장"""
+    os.makedirs(LOG_DIR, exist_ok=True)
     
-    print("\n[STEP 3/3] 변환된 청크 병합 중...")
+    # 원본 저장
+    original_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_original.sql"
+    with open(original_path, 'w', encoding='utf-8') as f:
+        f.write(f"-- Chunk {chunk.chunk_id}\n")
+        f.write(f"-- Type: {chunk.node_type}\n")
+        f.write(f"-- Context: {chunk.parent_context}\n")
+        f.write(f"-- Lines: {chunk.start_line}-{chunk.end_line}\n")
+        f.write(f"-- Line Count: {chunk.line_count()}\n\n")
+        f.write(chunk.content)
     
-    # 청크 ID 순으로 정렬
-    converted_chunks.sort(key=lambda x: x['chunk_id'])
-    
-    merged_sql = []
-    
-    # 헤더
-    merged_sql.append("-- ============================================================================")
-    merged_sql.append("-- PostgreSQL to Oracle 자동 변환 결과")
-    merged_sql.append(f"-- 원본 파일: {SQL_FILE_PATH}")
-    merged_sql.append(f"-- 변환 일시: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    merged_sql.append(f"-- 총 청크 수: {len(converted_chunks)}")
-    merged_sql.append("-- ============================================================================")
-    merged_sql.append("")
-    
-    # 각 청크 병합
-    for chunk in converted_chunks:
-        merged_sql.append(f"-- [Chunk {chunk['chunk_id']}] {chunk['name']}")
-        merged_sql.append(f"-- Lines: {chunk['start_line']}-{chunk['end_line']}")
-        if chunk.get('parent_context'):
-            merged_sql.append(f"-- Context: {chunk['parent_context']}")
-        merged_sql.append("-- " + "-" * 76)
-        merged_sql.append(chunk['oracle_code'])
-        merged_sql.append("")
-    
-    result = '\n'.join(merged_sql)
-    
-    print(f"[INFO] 병합 완료 ({len(result)} 문자)")
-    
-    return result
+    # 변환 저장
+    converted_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_converted.sql"
+    with open(converted_path, 'w', encoding='utf-8') as f:
+        f.write(f"-- Chunk {chunk.chunk_id} (Converted)\n")
+        f.write(f"-- Type: {chunk.node_type}\n")
+        f.write(f"-- Context: {chunk.parent_context}\n")
+        f.write(f"-- Lines: {chunk.start_line}-{chunk.end_line}\n\n")
+        f.write(converted)
+
 
 # ============================================================================
-# 로그 저장
+# 트리 재구성 및 렌더링
 # ============================================================================
-
-def save_log(filename, content):
-    """로그 파일 저장"""
-    
-    log_path = Path(LOG_DIR)
-    log_path.mkdir(exist_ok=True)
-    
-    filepath = log_path / filename
-    
-    if isinstance(content, dict):
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(content, f, indent=2, ensure_ascii=False)
+def apply_conversions_to_tree(
+    tree_node: TreeNode,
+    converted_chunks: Dict[int, str],
+    chunk_map: Dict[tuple, int]
+):
+    """변환 결과를 트리에 적용"""
+    if tree_node.is_leaf:
+        # 리프 노드 변환 적용
+        key = (tree_node.start_line, tree_node.end_line, True)
+        chunk_id = chunk_map.get(key)
+        if chunk_id is not None:
+            tree_node.converted_content = converted_chunks.get(chunk_id, tree_node.converted_content)
     else:
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(str(content))
+        # PREFIX 변환 적용
+        if tree_node.prefix:
+            first_child_start = tree_node.children[0].start_line if tree_node.children else tree_node.start_line
+            key = (tree_node.start_line, first_child_start - 1, False)
+            chunk_id = chunk_map.get(key)
+            if chunk_id is not None:
+                tree_node.converted_prefix = converted_chunks.get(chunk_id, tree_node.prefix)
+        
+        # 자식 재귀
+        if tree_node.children:
+            for child in tree_node.children:
+                apply_conversions_to_tree(child, converted_chunks, chunk_map)
+        
+        # SUFFIX 변환 적용
+        if tree_node.suffix:
+            last_child_end = tree_node.children[-1].end_line if tree_node.children else tree_node.end_line
+            key = (last_child_end + 1, tree_node.end_line, False)
+            chunk_id = chunk_map.get(key)
+            if chunk_id is not None:
+                tree_node.converted_suffix = converted_chunks.get(chunk_id, tree_node.suffix)
+
+
+def render_tree(tree_node: TreeNode) -> str:
+    """트리를 재귀적으로 렌더링하여 최종 SQL 생성"""
+    if tree_node.is_leaf:
+        return tree_node.converted_content or ""
+    
+    result = []
+    
+    # PREFIX
+    if tree_node.converted_prefix:
+        result.append(tree_node.converted_prefix)
+    elif tree_node.prefix:
+        result.append(tree_node.prefix)
+    
+    # 자식들
+    if tree_node.children:
+        for child in tree_node.children:
+            result.append(render_tree(child))
+    
+    # SUFFIX
+    if tree_node.converted_suffix:
+        result.append(tree_node.converted_suffix)
+    elif tree_node.suffix:
+        result.append(tree_node.suffix)
+    
+    return ''.join(result)
+
 
 # ============================================================================
 # 메인 실행
 # ============================================================================
-
 def main():
     """메인 실행 함수"""
-    
-    print("=" * 80)
-    print("PostgreSQL to Oracle 완전 자동 변환 시스템")
-    print("=" * 80 + "\n")
-    
     start_time = time.time()
     
-    try:
-        # 1. 파일 로드
-        sql_lines, ast_data = load_files()
-        
-        # 2. AST 분석 (리프 노드까지 재귀)
-        analysis = analyze_and_chunk_direct(sql_lines, ast_data)
-        if not analysis:
-            print("\n[ERROR] 분석 실패. 프로그램을 종료합니다.")
-            return
-        
-        # 3. 청크별 변환
-        converted_chunks = convert_all_chunks(analysis['chunks'], sql_lines)
-        
-        if not converted_chunks:
-            print("\n[ERROR] 변환된 청크가 없습니다.")
-            return
-        
-        # 4. 청크 병합
-        final_sql = merge_chunks(converted_chunks, analysis)
-        
-        # 5. 최종 파일 저장
-        with open(OUTPUT_SQL_FILE, 'w', encoding='utf-8') as f:
-            f.write(final_sql)
-        
-        elapsed_time = time.time() - start_time
-        
-        print("\n" + "=" * 80)
-        print("변환 완료")
-        print("=" * 80)
-        print(f"\n출력 파일: {OUTPUT_SQL_FILE}")
-        print(f"통계:")
-        print(f"  - 원본 라인 수: {len(sql_lines)}")
-        print(f"  - 총 청크 수: {len(analysis['chunks'])}")
-        print(f"  - 변환 성공: {len([c for c in converted_chunks if '[ERROR]' not in c['oracle_code']])}")
-        print(f"  - 소요 시간: {elapsed_time:.1f}초")
-        print(f"\n로그: {LOG_DIR}/")
-        print(f"\n[WARNING] 변환된 SQL을 실행 전 반드시 검토하세요\n")
-        
-    except Exception as e:
-        print(f"\n[ERROR] 오류: {e}")
-        import traceback
-        traceback.print_exc()
-        save_log("error.txt", traceback.format_exc())
+    # 로그 디렉토리 생성
+    os.makedirs(LOG_DIR, exist_ok=True)
+    
+    logger.info("=" * 80)
+    logger.info("PostgreSQL to Oracle 프로시저 자동 변환 시작")
+    logger.info("=" * 80)
+    
+    # 1. 파일 로드
+    logger.info("1단계: 파일 로드")
+    sql_lines = load_sql_file(SQL_FILE_PATH)
+    ast_data = load_ast_json(AST_JSON_PATH)
+    
+    # 2. 트리 구조 구축
+    logger.info("2단계: AST 트리 구조 구축")
+    tree_root = build_tree_structure(ast_data, sql_lines)
+    
+    # 3. 청크 수집
+    logger.info("3단계: 리프 노드 청크 수집")
+    chunks = []
+    chunk_id_counter = [1]
+    collect_leaf_chunks(tree_root, chunks, chunk_id_counter)
+    logger.info(f"총 {len(chunks)}개 청크 수집 완료")
+    
+    # 청크 맵 생성 (나중에 트리에 적용하기 위함)
+    chunk_map = {}
+    for chunk in chunks:
+        key = (chunk.start_line, chunk.end_line, chunk.is_leaf)
+        chunk_map[key] = chunk.chunk_id
+    
+    # 4. 청크별 변환 (병렬 처리)
+    logger.info("4단계: LLM 청크 변환 (병렬 처리)")
+    converted_chunks = asyncio.run(convert_all_chunks(chunks))
+    logger.info(f"변환 완료: {len(converted_chunks)}/{len(chunks)} 청크")
+    
+    # 5. 트리에 변환 결과 적용
+    logger.info("5단계: 트리에 변환 결과 적용")
+    apply_conversions_to_tree(tree_root, converted_chunks, chunk_map)
+    
+    # 6. 최종 SQL 렌더링
+    logger.info("6단계: 최종 Oracle SQL 렌더링")
+    final_sql = render_tree(tree_root)
+    
+    # 7. 파일 저장
+    logger.info("7단계: 최종 파일 저장")
+    with open(OUTPUT_SQL_FILE, 'w', encoding='utf-8') as f:
+        f.write(final_sql)
+    
+    # 분석 결과 저장
+    analysis = {
+        "total_chunks": len(chunks),
+        "converted_chunks": len(converted_chunks),
+        "failed_chunks": len(chunks) - len(converted_chunks),
+        "total_lines": len(sql_lines),
+        "chunks_detail": [
+            {
+                "chunk_id": chunk.chunk_id,
+                "type": chunk.node_type,
+                "context": chunk.parent_context,
+                "lines": f"{chunk.start_line}-{chunk.end_line}",
+                "line_count": chunk.line_count(),
+                "converted": chunk.chunk_id in converted_chunks
+            }
+            for chunk in chunks
+        ]
+    }
+    
+    with open(f"{LOG_DIR}/analysis_result.json", 'w', encoding='utf-8') as f:
+        json.dump(analysis, f, indent=2, ensure_ascii=False)
+    
+    elapsed_time = time.time() - start_time
+    
+    logger.info("=" * 80)
+    logger.info("변환 완료!")
+    logger.info(f"실행 시간: {elapsed_time:.2f}초")
+    logger.info(f"출력 파일: {OUTPUT_SQL_FILE}")
+    logger.info(f"로그 디렉토리: {LOG_DIR}")
+    logger.info("=" * 80)
+
 
 if __name__ == "__main__":
     main()
