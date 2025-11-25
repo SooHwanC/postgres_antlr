@@ -309,10 +309,9 @@ async def convert_chunk_with_llm(
                     timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
                 ) as response:
                     response.raise_for_status()
-                    result = await response.json()
                     
-                    # 응답에서 텍스트 추출 (API 형식에 따라 조정 필요)
-                    converted = result.get('text', '') or result.get('content', '') or result.get('message', '')
+                    # 텍스트 응답 직접 읽기
+                    converted = await response.text()
                     
                     # 코드 블록 마커 제거
                     converted = converted.replace('```sql', '').replace('```', '').strip()
