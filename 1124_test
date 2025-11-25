@@ -59,6 +59,7 @@ class Chunk:
     content: str
     parent_context: str
     is_leaf: bool
+    sequence: int  # 청크의 순서 (병합 시 사용)
     
     def line_count(self) -> int:
         return self.end_line - self.start_line + 1
@@ -66,17 +67,12 @@ class Chunk:
 
 @dataclass
 class TreeNode:
-    """트리 구조 노드"""
+    """트리 구조 노드 (순회용)"""
     node_type: str
     start_line: int
     end_line: int
     parent_context: str
-    prefix: Optional[str] = None
-    suffix: Optional[str] = None
     children: Optional[List['TreeNode']] = None
-    converted_prefix: Optional[str] = None
-    converted_suffix: Optional[str] = None
-    converted_content: Optional[str] = None  # 리프 노드용
     is_leaf: bool = False
 
 
@@ -144,46 +140,47 @@ def build_tree_structure(
     # children이 없으면 리프 노드
     if not children:
         tree_node.is_leaf = True
-        tree_node.converted_content = extract_lines(sql_lines, start_line, end_line)
         return tree_node
     
     # children이 있으면 컨테이너 노드 - 반드시 재귀 탐색
     tree_node.is_leaf = False
     tree_node.children = []
     
-    # PREFIX 추출: 부모 시작 ~ 첫 자식 시작-1
-    first_child_start = children[0].get('startLine', start_line)
-    if first_child_start > start_line:
-        tree_node.prefix = extract_lines(sql_lines, start_line, first_child_start - 1)
-    
     # 모든 자식 재귀 처리 (절대 원칙!)
     for child in children:
         child_tree = build_tree_structure(child, sql_lines, current_context)
         tree_node.children.append(child_tree)
     
-    # SUFFIX 추출: 마지막 자식 끝+1 ~ 부모 끝
-    last_child_end = children[-1].get('endLine', end_line)
-    if last_child_end < end_line:
-        tree_node.suffix = extract_lines(sql_lines, last_child_end + 1, end_line)
-    
     return tree_node
 
 
-def collect_leaf_chunks(tree_node: TreeNode, chunks: List[Chunk], chunk_id_counter: List[int]):
-    """트리에서 모든 리프 노드(청크)를 수집"""
+def collect_chunks_in_order(
+    tree_node: TreeNode, 
+    sql_lines: List[str],
+    chunks: List[Chunk], 
+    chunk_id_counter: List[int],
+    sequence_counter: List[int]
+):
+    """
+    트리를 순회하면서 청크를 순서대로 수집
+    PREFIX -> 자식들 -> SUFFIX 순서로 수집하여 나중에 순서대로 병합 가능
+    """
     if tree_node.is_leaf:
-        # 리프 노드 = 청크
+        # 리프 노드 = 하나의 청크
+        content = extract_lines(sql_lines, tree_node.start_line, tree_node.end_line)
         chunk = Chunk(
             chunk_id=chunk_id_counter[0],
             node_type=tree_node.node_type,
             start_line=tree_node.start_line,
             end_line=tree_node.end_line,
-            content=tree_node.converted_content,
+            content=content,
             parent_context=tree_node.parent_context,
-            is_leaf=True
+            is_leaf=True,
+            sequence=sequence_counter[0]
         )
         chunks.append(chunk)
         chunk_id_counter[0] += 1
+        sequence_counter[0] += 1
         
         # 500 라인 초과 경고
         if chunk.line_count() > MAX_CHUNK_LINES:
@@ -192,38 +189,50 @@ def collect_leaf_chunks(tree_node: TreeNode, chunks: List[Chunk], chunk_id_count
                 f"({chunk.start_line}-{chunk.end_line})"
             )
     else:
-        # PREFIX도 변환 대상
-        if tree_node.prefix:
-            chunk = Chunk(
-                chunk_id=chunk_id_counter[0],
-                node_type=f"{tree_node.node_type}_PREFIX",
-                start_line=tree_node.start_line,
-                end_line=tree_node.children[0].start_line - 1 if tree_node.children else tree_node.start_line,
-                content=tree_node.prefix,
-                parent_context=tree_node.parent_context,
-                is_leaf=False
-            )
-            chunks.append(chunk)
-            chunk_id_counter[0] += 1
+        # 컨테이너 노드 - PREFIX, 자식들, SUFFIX 순서로 처리
         
-        # 자식 재귀
+        # 1. PREFIX 추출 및 청크 생성
+        if tree_node.children:
+            first_child_start = tree_node.children[0].start_line
+            if first_child_start > tree_node.start_line:
+                prefix_content = extract_lines(sql_lines, tree_node.start_line, first_child_start - 1)
+                chunk = Chunk(
+                    chunk_id=chunk_id_counter[0],
+                    node_type=f"{tree_node.node_type}_PREFIX",
+                    start_line=tree_node.start_line,
+                    end_line=first_child_start - 1,
+                    content=prefix_content,
+                    parent_context=tree_node.parent_context,
+                    is_leaf=False,
+                    sequence=sequence_counter[0]
+                )
+                chunks.append(chunk)
+                chunk_id_counter[0] += 1
+                sequence_counter[0] += 1
+        
+        # 2. 자식 재귀 처리 (순서대로)
         if tree_node.children:
             for child in tree_node.children:
-                collect_leaf_chunks(child, chunks, chunk_id_counter)
+                collect_chunks_in_order(child, sql_lines, chunks, chunk_id_counter, sequence_counter)
         
-        # SUFFIX도 변환 대상
-        if tree_node.suffix:
-            chunk = Chunk(
-                chunk_id=chunk_id_counter[0],
-                node_type=f"{tree_node.node_type}_SUFFIX",
-                start_line=tree_node.children[-1].end_line + 1 if tree_node.children else tree_node.end_line,
-                end_line=tree_node.end_line,
-                content=tree_node.suffix,
-                parent_context=tree_node.parent_context,
-                is_leaf=False
-            )
-            chunks.append(chunk)
-            chunk_id_counter[0] += 1
+        # 3. SUFFIX 추출 및 청크 생성
+        if tree_node.children:
+            last_child_end = tree_node.children[-1].end_line
+            if last_child_end < tree_node.end_line:
+                suffix_content = extract_lines(sql_lines, last_child_end + 1, tree_node.end_line)
+                chunk = Chunk(
+                    chunk_id=chunk_id_counter[0],
+                    node_type=f"{tree_node.node_type}_SUFFIX",
+                    start_line=last_child_end + 1,
+                    end_line=tree_node.end_line,
+                    content=suffix_content,
+                    parent_context=tree_node.parent_context,
+                    is_leaf=False,
+                    sequence=sequence_counter[0]
+                )
+                chunks.append(chunk)
+                chunk_id_counter[0] += 1
+                sequence_counter[0] += 1
 
 
 # ============================================================================
@@ -388,64 +397,26 @@ def save_chunk_log(chunk: Chunk, converted: str):
 # ============================================================================
 # 트리 재구성 및 렌더링
 # ============================================================================
-def apply_conversions_to_tree(
-    tree_node: TreeNode,
-    converted_chunks: Dict[int, str],
-    chunk_map: Dict[tuple, int]
-):
-    """변환 결과를 트리에 적용"""
-    if tree_node.is_leaf:
-        # 리프 노드 변환 적용
-        key = (tree_node.start_line, tree_node.end_line, True)
-        chunk_id = chunk_map.get(key)
-        if chunk_id is not None:
-            tree_node.converted_content = converted_chunks.get(chunk_id, tree_node.converted_content)
-    else:
-        # PREFIX 변환 적용
-        if tree_node.prefix:
-            first_child_start = tree_node.children[0].start_line if tree_node.children else tree_node.start_line
-            key = (tree_node.start_line, first_child_start - 1, False)
-            chunk_id = chunk_map.get(key)
-            if chunk_id is not None:
-                tree_node.converted_prefix = converted_chunks.get(chunk_id, tree_node.prefix)
-        
-        # 자식 재귀
-        if tree_node.children:
-            for child in tree_node.children:
-                apply_conversions_to_tree(child, converted_chunks, chunk_map)
-        
-        # SUFFIX 변환 적용
-        if tree_node.suffix:
-            last_child_end = tree_node.children[-1].end_line if tree_node.children else tree_node.end_line
-            key = (last_child_end + 1, tree_node.end_line, False)
-            chunk_id = chunk_map.get(key)
-            if chunk_id is not None:
-                tree_node.converted_suffix = converted_chunks.get(chunk_id, tree_node.suffix)
-
-
-def render_tree(tree_node: TreeNode) -> str:
-    """트리를 재귀적으로 렌더링하여 최종 SQL 생성"""
-    if tree_node.is_leaf:
-        return tree_node.converted_content or ""
+def merge_converted_chunks(chunks: List[Chunk], converted_chunks: Dict[int, str]) -> str:
+    """
+    변환된 청크들을 순서대로 병합
+    sequence 순서대로 정렬 후 그대로 이어붙임
+    """
+    # sequence 순서로 정렬
+    sorted_chunks = sorted(chunks, key=lambda c: c.sequence)
     
     result = []
-    
-    # PREFIX
-    if tree_node.converted_prefix:
-        result.append(tree_node.converted_prefix)
-    elif tree_node.prefix:
-        result.append(tree_node.prefix)
-    
-    # 자식들
-    if tree_node.children:
-        for child in tree_node.children:
-            result.append(render_tree(child))
-    
-    # SUFFIX
-    if tree_node.converted_suffix:
-        result.append(tree_node.converted_suffix)
-    elif tree_node.suffix:
-        result.append(tree_node.suffix)
+    for chunk in sorted_chunks:
+        converted = converted_chunks.get(chunk.chunk_id)
+        if converted:
+            result.append(converted)
+            if not converted.endswith('\n'):
+                result.append('\n')
+        else:
+            # 변환 실패한 경우 원본을 주석 처리하여 포함
+            logger.warning(f"청크 {chunk.chunk_id} 변환 실패 - 원본을 주석으로 포함")
+            result.append(f"-- [변환 실패 - 원본]\n")
+            result.append(f"-- {chunk.content.replace(chr(10), chr(10) + '-- ')}\n")
     
     return ''.join(result)
 
@@ -473,34 +444,25 @@ def main():
     logger.info("2단계: AST 트리 구조 구축")
     tree_root = build_tree_structure(ast_data, sql_lines)
     
-    # 3. 청크 수집
-    logger.info("3단계: 리프 노드 청크 수집")
+    # 3. 청크 수집 (순서대로!)
+    logger.info("3단계: 청크 순서대로 수집")
     chunks = []
     chunk_id_counter = [1]
-    collect_leaf_chunks(tree_root, chunks, chunk_id_counter)
-    logger.info(f"총 {len(chunks)}개 청크 수집 완료")
-    
-    # 청크 맵 생성 (나중에 트리에 적용하기 위함)
-    chunk_map = {}
-    for chunk in chunks:
-        key = (chunk.start_line, chunk.end_line, chunk.is_leaf)
-        chunk_map[key] = chunk.chunk_id
+    sequence_counter = [0]
+    collect_chunks_in_order(tree_root, sql_lines, chunks, chunk_id_counter, sequence_counter)
+    logger.info(f"총 {len(chunks)}개 청크 수집 완료 (순서: 0-{sequence_counter[0]-1})")
     
     # 4. 청크별 변환 (병렬 처리)
     logger.info("4단계: LLM 청크 변환 (병렬 처리)")
     converted_chunks = asyncio.run(convert_all_chunks(chunks))
     logger.info(f"변환 완료: {len(converted_chunks)}/{len(chunks)} 청크")
     
-    # 5. 트리에 변환 결과 적용
-    logger.info("5단계: 트리에 변환 결과 적용")
-    apply_conversions_to_tree(tree_root, converted_chunks, chunk_map)
+    # 5. 청크 병합 (순서대로!)
+    logger.info("5단계: 변환된 청크를 순서대로 병합")
+    final_sql = merge_converted_chunks(chunks, converted_chunks)
     
-    # 6. 최종 SQL 렌더링
-    logger.info("6단계: 최종 Oracle SQL 렌더링")
-    final_sql = render_tree(tree_root)
-    
-    # 7. 파일 저장
-    logger.info("7단계: 최종 파일 저장")
+    # 6. 파일 저장
+    logger.info("6단계: 최종 파일 저장")
     with open(OUTPUT_SQL_FILE, 'w', encoding='utf-8') as f:
         f.write(final_sql)
     
@@ -513,6 +475,7 @@ def main():
         "chunks_detail": [
             {
                 "chunk_id": chunk.chunk_id,
+                "sequence": chunk.sequence,
                 "type": chunk.node_type,
                 "context": chunk.parent_context,
                 "lines": f"{chunk.start_line}-{chunk.end_line}",
