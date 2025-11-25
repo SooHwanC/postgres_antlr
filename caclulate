@@ -1,33 +1,41 @@
 import pandas as pd
+import numpy as np
 from typing import Dict
 import json
 
-def compare_procedure_results(oracle_csv: str, llm_csv: str) -> Dict:
+def compare_procedure_results(oracle_csv: str, llm_csv: str, 
+                              decimal_places: int = 17) -> Dict:
     """
     오라클 전문가 프로시저 결과와 LLM 변환 프로시저 결과를 비교하여 정확도를 산출
-    모든 컬럼 값이 완전히 동일한 레코드만 정답으로 처리
+    소수점 데이터는 지정된 자리수까지만 비교
+    
+    Parameters:
+    -----------
+    oracle_csv : str
+        오라클 전문가가 작성한 프로시저 결과 CSV 파일 경로
+    llm_csv : str
+        LLM으로 변환한 프로시저 결과 CSV 파일 경로
+    decimal_places : int
+        소수점 비교 자리수 (기본값: 17)
     """
     
-    # CSV 파일 로드 - 모든 컬럼을 문자열로 읽음
+    # CSV 파일 로드
     print("CSV 파일 로드 중...")
-    df_oracle = pd.read_csv(oracle_csv, dtype=str, low_memory=False)
-    df_llm = pd.read_csv(llm_csv, dtype=str, low_memory=False)
+    df_oracle = pd.read_csv(oracle_csv, low_memory=False)
+    df_llm = pd.read_csv(llm_csv, low_memory=False)
     
     print(f"오라클 전문가 결과: {len(df_oracle):,}건")
     print(f"LLM 변환 결과: {len(df_llm):,}건")
     
-    # NaN을 빈 문자열로 변환
-    df_oracle = df_oracle.fillna('')
-    df_llm = df_llm.fillna('')
+    # 데이터 정규화
+    print(f"\n데이터 정규화 중 (소수점 {decimal_places}자리 기준)...")
+    df_oracle_normalized = normalize_dataframe(df_oracle, decimal_places)
+    df_llm_normalized = normalize_dataframe(df_llm, decimal_places)
     
-    # 공백 제거 (양쪽)
-    df_oracle = df_oracle.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
-    df_llm = df_llm.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
-    
-    # 전체 레코드를 문자열로 변환하여 비교
-    print("\n레코드 매칭 중...")
-    oracle_records = set(df_oracle.apply(lambda row: tuple(row), axis=1))
-    llm_records = set(df_llm.apply(lambda row: tuple(row), axis=1))
+    # 전체 레코드를 튜플로 변환하여 비교
+    print("레코드 매칭 중...")
+    oracle_records = set(df_oracle_normalized.apply(lambda row: tuple(row), axis=1))
+    llm_records = set(df_llm_normalized.apply(lambda row: tuple(row), axis=1))
     
     # 교집합, 차집합 계산
     matching_records = oracle_records & llm_records  # 완전 일치
@@ -66,7 +74,8 @@ def compare_procedure_results(oracle_csv: str, llm_csv: str) -> Dict:
         },
         "details": {
             "matching_percentage": round(num_matching / num_oracle * 100, 2) if num_oracle > 0 else 0,
-            "extra_records_percentage": round(num_only_llm / num_llm * 100, 2) if num_llm > 0 else 0
+            "extra_records_percentage": round(num_only_llm / num_llm * 100, 2) if num_llm > 0 else 0,
+            "decimal_places": decimal_places
         }
     }
     
@@ -74,9 +83,40 @@ def compare_procedure_results(oracle_csv: str, llm_csv: str) -> Dict:
     print_results(results)
     
     # 샘플 데이터 저장
-    save_samples(df_oracle, df_llm, only_in_oracle, only_in_llm)
+    save_samples(df_oracle, df_llm, df_oracle_normalized, df_llm_normalized,
+                 only_in_oracle, only_in_llm)
     
     return results
+
+
+def normalize_dataframe(df: pd.DataFrame, decimal_places: int) -> pd.DataFrame:
+    """
+    데이터프레임을 정규화
+    - 소수점 데이터는 지정된 자리수로 반올림
+    - 문자열은 공백 제거
+    - NaN은 빈 문자열로 변환
+    """
+    df_normalized = df.copy()
+    
+    for col in df_normalized.columns:
+        # 숫자형 컬럼 처리
+        if pd.api.types.is_numeric_dtype(df_normalized[col]):
+            # 소수점이 있는 경우만 반올림
+            if df_normalized[col].dtype in [np.float64, np.float32]:
+                df_normalized[col] = df_normalized[col].round(decimal_places)
+            # 정수형은 그대로 유지
+        else:
+            # 문자열 컬럼 처리
+            df_normalized[col] = df_normalized[col].astype(str).str.strip()
+    
+    # NaN을 빈 문자열로 변환
+    df_normalized = df_normalized.fillna('')
+    
+    # 모든 컬럼을 문자열로 변환 (비교를 위해)
+    for col in df_normalized.columns:
+        df_normalized[col] = df_normalized[col].astype(str)
+    
+    return df_normalized
 
 
 def print_results(results: Dict):
@@ -100,12 +140,14 @@ def print_results(results: Dict):
     print(f"  오삽입률:           {results['metrics']['false_insertion_rate']}%")
     
     print("\n[상세 분석]")
+    print(f"  소수점 비교 자리수: {results['details']['decimal_places']}자리")
     print(f"  정답 대비 일치율:   {results['details']['matching_percentage']}%")
     print(f"  불필요한 레코드 비율: {results['details']['extra_records_percentage']}%")
     print("="*60 + "\n")
 
 
 def save_samples(df_oracle: pd.DataFrame, df_llm: pd.DataFrame,
+                df_oracle_normalized: pd.DataFrame, df_llm_normalized: pd.DataFrame,
                 only_in_oracle: set, only_in_llm: set,
                 sample_size: int = 10):
     """차이나는 레코드의 샘플을 CSV 파일로 저장"""
@@ -114,9 +156,9 @@ def save_samples(df_oracle: pd.DataFrame, df_llm: pd.DataFrame,
     # 누락된 레코드 샘플
     if only_in_oracle:
         missing_samples = []
-        for i, row in df_oracle.iterrows():
+        for i, row in df_oracle_normalized.iterrows():
             if tuple(row) in only_in_oracle:
-                missing_samples.append(row)
+                missing_samples.append(df_oracle.iloc[i])
             if len(missing_samples) >= sample_size:
                 break
         
@@ -128,9 +170,9 @@ def save_samples(df_oracle: pd.DataFrame, df_llm: pd.DataFrame,
     # 잘못 추가된 레코드 샘플
     if only_in_llm:
         extra_samples = []
-        for i, row in df_llm.iterrows():
+        for i, row in df_llm_normalized.iterrows():
             if tuple(row) in only_in_llm:
-                extra_samples.append(row)
+                extra_samples.append(df_llm.iloc[i])
             if len(extra_samples) >= sample_size:
                 break
         
@@ -142,9 +184,11 @@ def save_samples(df_oracle: pd.DataFrame, df_llm: pd.DataFrame,
 
 # 사용 예시
 if __name__ == "__main__":
+    # 함수 호출 - 소수점 17자리 기준
     results = compare_procedure_results(
         oracle_csv='oracle_expert_result.csv',
-        llm_csv='llm_converted_result.csv'
+        llm_csv='llm_converted_result.csv',
+        decimal_places=17  # 소수점 17자리까지만 비교
     )
     
     # 결과를 JSON 파일로도 저장
