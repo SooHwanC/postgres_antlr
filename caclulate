@@ -1,0 +1,197 @@
+import pandas as pd
+import numpy as np
+from typing import Tuple, Dict
+import json
+
+def compare_procedure_results(oracle_csv: str, llm_csv: str, 
+                              float_tolerance: float = 1e-6) -> Dict:
+    """
+    오라클 전문가 프로시저 결과와 LLM 변환 프로시저 결과를 비교하여 정확도를 산출
+    
+    Parameters:
+    -----------
+    oracle_csv : str
+        오라클 전문가가 작성한 프로시저 결과 CSV 파일 경로
+    llm_csv : str
+        LLM으로 변환한 프로시저 결과 CSV 파일 경로
+    float_tolerance : float
+        부동소수점 비교 시 허용 오차 (기본값: 1e-6)
+    
+    Returns:
+    --------
+    Dict : 정확도 분석 결과를 담은 딕셔너리
+    """
+    
+    # CSV 파일 로드
+    print("CSV 파일 로드 중...")
+    df_oracle = pd.read_csv(oracle_csv)
+    df_llm = pd.read_csv(llm_csv)
+    
+    print(f"오라클 전문가 결과: {len(df_oracle):,}건")
+    print(f"LLM 변환 결과: {len(df_llm):,}건")
+    
+    # 데이터 정규화 (비교를 위해)
+    df_oracle_normalized = normalize_dataframe(df_oracle, float_tolerance)
+    df_llm_normalized = normalize_dataframe(df_llm, float_tolerance)
+    
+    # 전체 레코드를 문자열로 변환하여 비교
+    print("\n레코드 매칭 중...")
+    oracle_records = set(df_oracle_normalized.apply(lambda row: tuple(row), axis=1))
+    llm_records = set(df_llm_normalized.apply(lambda row: tuple(row), axis=1))
+    
+    # 교집합, 차집합 계산
+    matching_records = oracle_records & llm_records  # 완전 일치
+    only_in_oracle = oracle_records - llm_records    # 누락된 데이터
+    only_in_llm = llm_records - oracle_records       # 잘못 추가된 데이터
+    
+    # 정확도 지표 계산
+    num_matching = len(matching_records)
+    num_oracle = len(oracle_records)
+    num_llm = len(llm_records)
+    num_only_oracle = len(only_in_oracle)
+    num_only_llm = len(only_in_llm)
+    
+    precision = num_matching / num_llm if num_llm > 0 else 0
+    recall = num_matching / num_oracle if num_oracle > 0 else 0
+    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    
+    missing_rate = num_only_oracle / num_oracle if num_oracle > 0 else 0
+    false_insertion_rate = num_only_llm / num_llm if num_llm > 0 else 0
+    
+    # 결과 딕셔너리 생성
+    results = {
+        "summary": {
+            "oracle_total": num_oracle,
+            "llm_total": num_llm,
+            "matching": num_matching,
+            "only_in_oracle": num_only_oracle,
+            "only_in_llm": num_only_llm
+        },
+        "metrics": {
+            "precision": round(precision * 100, 2),  # 정확도 (%)
+            "recall": round(recall * 100, 2),        # 재현율 (%)
+            "f1_score": round(f1_score * 100, 2),    # F1 점수 (%)
+            "missing_rate": round(missing_rate * 100, 2),  # 누락률 (%)
+            "false_insertion_rate": round(false_insertion_rate * 100, 2)  # 오삽입률 (%)
+        },
+        "details": {
+            "matching_percentage": round(num_matching / num_oracle * 100, 2),
+            "extra_records_percentage": round(num_only_llm / num_llm * 100, 2)
+        }
+    }
+    
+    # 결과 출력
+    print_results(results)
+    
+    # 샘플 데이터 저장 (선택적)
+    save_samples(df_oracle, df_llm, only_in_oracle, only_in_llm, 
+                 oracle_records, llm_records)
+    
+    return results
+
+
+def normalize_dataframe(df: pd.DataFrame, float_tolerance: float) -> pd.DataFrame:
+    """
+    데이터프레임을 정규화하여 비교 가능한 형태로 변환
+    """
+    df_normalized = df.copy()
+    
+    # 부동소수점 컬럼을 지정된 정밀도로 반올림
+    float_columns = df_normalized.select_dtypes(include=[np.float64, np.float32]).columns
+    for col in float_columns:
+        # 허용 오차를 고려하여 반올림
+        decimal_places = int(abs(np.log10(float_tolerance)))
+        df_normalized[col] = df_normalized[col].round(decimal_places)
+    
+    # NaN을 일관된 값으로 변환 (빈 문자열)
+    df_normalized = df_normalized.fillna('')
+    
+    # 문자열 컬럼의 공백 제거
+    string_columns = df_normalized.select_dtypes(include=['object']).columns
+    for col in string_columns:
+        df_normalized[col] = df_normalized[col].astype(str).str.strip()
+    
+    return df_normalized
+
+
+def print_results(results: Dict):
+    """
+    분석 결과를 보기 좋게 출력
+    """
+    print("\n" + "="*60)
+    print("프로시저 정확도 분석 결과")
+    print("="*60)
+    
+    print("\n[레코드 수 요약]")
+    print(f"  오라클 전문가 결과: {results['summary']['oracle_total']:,}건")
+    print(f"  LLM 변환 결과:      {results['summary']['llm_total']:,}건")
+    print(f"  완전 일치:          {results['summary']['matching']:,}건")
+    print(f"  누락된 데이터:      {results['summary']['only_in_oracle']:,}건")
+    print(f"  잘못 추가된 데이터: {results['summary']['only_in_llm']:,}건")
+    
+    print("\n[정확도 지표]")
+    print(f"  Precision (정확도):  {results['metrics']['precision']}%")
+    print(f"  Recall (재현율):     {results['metrics']['recall']}%")
+    print(f"  F1 Score:           {results['metrics']['f1_score']}%")
+    print(f"  누락률:             {results['metrics']['missing_rate']}%")
+    print(f"  오삽입률:           {results['metrics']['false_insertion_rate']}%")
+    
+    print("\n[상세 분석]")
+    print(f"  정답 대비 일치율:   {results['details']['matching_percentage']}%")
+    print(f"  불필요한 레코드 비율: {results['details']['extra_records_percentage']}%")
+    print("="*60 + "\n")
+
+
+def save_samples(df_oracle: pd.DataFrame, df_llm: pd.DataFrame,
+                only_in_oracle: set, only_in_llm: set,
+                oracle_records: set, llm_records: set,
+                sample_size: int = 10):
+    """
+    차이나는 레코드의 샘플을 CSV 파일로 저장
+    """
+    print("샘플 데이터 저장 중...")
+    
+    # 누락된 레코드 샘플
+    if only_in_oracle:
+        df_oracle_normalized = normalize_dataframe(df_oracle, 1e-6)
+        missing_samples = []
+        for i, row in df_oracle_normalized.iterrows():
+            if tuple(row) in only_in_oracle:
+                missing_samples.append(df_oracle.iloc[i])
+            if len(missing_samples) >= sample_size:
+                break
+        
+        if missing_samples:
+            pd.DataFrame(missing_samples).to_csv('missing_records_sample.csv', 
+                                                  index=False, encoding='utf-8-sig')
+            print(f"  누락된 레코드 샘플 저장: missing_records_sample.csv")
+    
+    # 잘못 추가된 레코드 샘플
+    if only_in_llm:
+        df_llm_normalized = normalize_dataframe(df_llm, 1e-6)
+        extra_samples = []
+        for i, row in df_llm_normalized.iterrows():
+            if tuple(row) in only_in_llm:
+                extra_samples.append(df_llm.iloc[i])
+            if len(extra_samples) >= sample_size:
+                break
+        
+        if extra_samples:
+            pd.DataFrame(extra_samples).to_csv('extra_records_sample.csv', 
+                                                index=False, encoding='utf-8-sig')
+            print(f"  잘못 추가된 레코드 샘플 저장: extra_records_sample.csv")
+
+
+# 사용 예시
+if __name__ == "__main__":
+    # 함수 호출
+    results = compare_procedure_results(
+        oracle_csv='oracle_expert_result.csv',
+        llm_csv='llm_converted_result.csv',
+        float_tolerance=1e-6  # 부동소수점 비교 허용 오차
+    )
+    
+    # 결과를 JSON 파일로도 저장
+    with open('comparison_results.json', 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    print("상세 결과가 comparison_results.json에 저장되었습니다.")
