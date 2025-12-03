@@ -24,6 +24,10 @@ def compare_procedure_results(oracle_csv: str, llm_csv: str,
     df_oracle = pd.read_csv(oracle_csv, low_memory=False)
     df_llm = pd.read_csv(llm_csv, low_memory=False)
     
+    # 컬럼명을 소문자로 통일 (대소문자 구분 제거)
+    df_oracle.columns = df_oracle.columns.str.lower()
+    df_llm.columns = df_llm.columns.str.lower()
+    
     print(f"오라클 전문가 결과: {len(df_oracle):,}건")
     print(f"LLM 변환 결과: {len(df_llm):,}건")
     
