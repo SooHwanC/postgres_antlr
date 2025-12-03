@@ -63,12 +63,8 @@ def compare_procedure_results(oracle_csv: str, llm_csv: str,
     num_only_oracle = len(only_in_oracle)
     num_only_llm = len(only_in_llm)
     
-    precision = num_matching / num_llm if num_llm > 0 else 0
-    recall = num_matching / num_oracle if num_oracle > 0 else 0
-    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-    
-    missing_rate = num_only_oracle / num_oracle if num_oracle > 0 else 0
-    false_insertion_rate = num_only_llm / num_llm if num_llm > 0 else 0
+    # 완전 일치율만 계산
+    match_rate = num_matching / num_oracle * 100 if num_oracle > 0 else 0
     
     # 결과 딕셔너리 생성
     results = {
@@ -76,29 +72,18 @@ def compare_procedure_results(oracle_csv: str, llm_csv: str,
             "oracle_total": num_oracle,
             "llm_total": num_llm,
             "matching": num_matching,
-            "only_in_oracle": num_only_oracle,
-            "only_in_llm": num_only_llm
-        },
-        "metrics": {
-            "precision": round(precision * 100, 2),
-            "recall": round(recall * 100, 2),
-            "f1_score": round(f1_score * 100, 2),
-            "missing_rate": round(missing_rate * 100, 2),
-            "false_insertion_rate": round(false_insertion_rate * 100, 2)
-        },
-        "details": {
-            "matching_percentage": round(num_matching / num_oracle * 100, 2) if num_oracle > 0 else 0,
-            "extra_records_percentage": round(num_only_llm / num_llm * 100, 2) if num_llm > 0 else 0,
-            "decimal_places": decimal_places
+            "not_matching_oracle": num_only_oracle,
+            "not_matching_llm": num_only_llm,
+            "match_rate": round(match_rate, 2)
         }
     }
     
     # 결과 출력
     print_results(results)
     
-    # 상세 비교 결과 저장
-    save_detailed_comparison(df_oracle, df_llm, df_oracle_normalized, df_llm_normalized,
-                            matching_records, only_in_oracle, only_in_llm)
+    # 불일치 레코드만 저장
+    save_mismatched_records(df_oracle, df_llm, df_oracle_normalized, df_llm_normalized,
+                           only_in_oracle, only_in_llm)
     
     return results
 
@@ -153,214 +138,39 @@ def normalize_dataframe(df: pd.DataFrame, decimal_places: int) -> pd.DataFrame:
     return df_normalized
 
 
-def find_matching_row_index(row_tuple: Tuple, df_normalized: pd.DataFrame) -> int:
-    """정규화된 데이터프레임에서 해당 튜플과 일치하는 행의 인덱스를 찾음"""
-    for idx, row in df_normalized.iterrows():
-        if tuple(row) == row_tuple:
-            return idx
-    return -1
-
-
-def compare_rows_column_by_column(oracle_row: pd.Series, llm_row: pd.Series, 
-                                  oracle_norm: pd.Series, llm_norm: pd.Series) -> pd.DataFrame:
-    """
-    두 행을 컬럼별로 비교하여 차이점을 데이터프레임으로 반환
-    """
-    comparison_data = []
+def save_mismatched_records(df_oracle: pd.DataFrame, df_llm: pd.DataFrame,
+                           df_oracle_normalized: pd.DataFrame, 
+                           df_llm_normalized: pd.DataFrame,
+                           only_in_oracle: Set[Tuple], 
+                           only_in_llm: Set[Tuple]):
+    """불일치하는 레코드만 Oracle과 LLM별로 저장"""
+    print("\n불일치 레코드 저장 중...")
     
-    for col in oracle_row.index:
-        oracle_val = oracle_row[col]
-        llm_val = llm_row[col]
-        oracle_norm_val = oracle_norm[col]
-        llm_norm_val = llm_norm[col]
-        
-        match = oracle_norm_val == llm_norm_val
-        
-        comparison_data.append({
-            'Column': col,
-            'Oracle_Original': oracle_val,
-            'LLM_Original': llm_val,
-            'Oracle_Normalized': oracle_norm_val,
-            'LLM_Normalized': llm_norm_val,
-            'Match': '✓' if match else '✗'
-        })
-    
-    return pd.DataFrame(comparison_data)
-
-
-def save_detailed_comparison(df_oracle: pd.DataFrame, df_llm: pd.DataFrame,
-                            df_oracle_normalized: pd.DataFrame, 
-                            df_llm_normalized: pd.DataFrame,
-                            matching_records: Set[Tuple],
-                            only_in_oracle: Set[Tuple], 
-                            only_in_llm: Set[Tuple],
-                            sample_size: int = 100):
-    """차이나는 레코드의 상세 비교 결과를 저장"""
-    print("\n상세 비교 결과 저장 중...")
-    
-    # 1. 완전 일치하는 레코드 샘플 저장
-    if matching_records:
-        print(f"  완전 일치 레코드 샘플 추출 중... (최대 {sample_size}개)")
-        matching_samples = []
-        for i, row in df_oracle_normalized.iterrows():
-            if tuple(row) in matching_records:
-                matching_samples.append(df_oracle.iloc[i])
-            if len(matching_samples) >= sample_size:
-                break
-        
-        if matching_samples:
-            df_matching = pd.DataFrame(matching_samples)
-            df_matching.to_csv('01_matching_records.csv', index=False, encoding='utf-8-sig')
-            print(f"    ✓ 완전 일치 레코드: 01_matching_records.csv ({len(df_matching)}개)")
-    
-    # 2. Oracle에만 있는 레코드 (누락된 데이터)
+    # Oracle에만 있는 레코드 (LLM에서 누락되거나 다른 값)
     if only_in_oracle:
-        print(f"  Oracle 전용 레코드 추출 중... (최대 {sample_size}개)")
-        missing_samples = []
+        oracle_mismatched = []
         for i, row in df_oracle_normalized.iterrows():
             if tuple(row) in only_in_oracle:
-                missing_samples.append(df_oracle.iloc[i])
-            if len(missing_samples) >= sample_size:
-                break
+                oracle_mismatched.append(df_oracle.iloc[i])
         
-        if missing_samples:
-            df_missing = pd.DataFrame(missing_samples)
-            df_missing.to_csv('02_missing_in_llm.csv', index=False, encoding='utf-8-sig')
-            print(f"    ✓ LLM에서 누락된 레코드: 02_missing_in_llm.csv ({len(df_missing)}개)")
+        if oracle_mismatched:
+            df_oracle_mismatch = pd.DataFrame(oracle_mismatched)
+            df_oracle_mismatch.to_csv('oracle_mismatched.csv', index=False, encoding='utf-8-sig')
+            print(f"  ✓ Oracle 불일치 레코드: oracle_mismatched.csv ({len(df_oracle_mismatch):,}건)")
     
-    # 3. LLM에만 있는 레코드 (잘못 추가된 데이터)
+    # LLM에만 있는 레코드 (잘못 추가되거나 다른 값)
     if only_in_llm:
-        print(f"  LLM 전용 레코드 추출 중... (최대 {sample_size}개)")
-        extra_samples = []
+        llm_mismatched = []
         for i, row in df_llm_normalized.iterrows():
             if tuple(row) in only_in_llm:
-                extra_samples.append(df_llm.iloc[i])
-            if len(extra_samples) >= sample_size:
-                break
+                llm_mismatched.append(df_llm.iloc[i])
         
-        if extra_samples:
-            df_extra = pd.DataFrame(extra_samples)
-            df_extra.to_csv('03_extra_in_llm.csv', index=False, encoding='utf-8-sig')
-            print(f"    ✓ LLM에 잘못 추가된 레코드: 03_extra_in_llm.csv ({len(df_extra)}개)")
+        if llm_mismatched:
+            df_llm_mismatch = pd.DataFrame(llm_mismatched)
+            df_llm_mismatch.to_csv('llm_mismatched.csv', index=False, encoding='utf-8-sig')
+            print(f"  ✓ LLM 불일치 레코드: llm_mismatched.csv ({len(df_llm_mismatch):,}건)")
     
-    # 4. 행은 같은데 순서가 다른 경우나 부분 일치 찾기 (선택적)
-    print("\n  부분 일치 레코드 분석 중...")
-    partial_matches = find_partial_matches(df_oracle, df_llm, 
-                                          df_oracle_normalized, df_llm_normalized,
-                                          only_in_oracle, only_in_llm, 
-                                          max_samples=20)
-    
-    if partial_matches:
-        with pd.ExcelWriter('04_partial_matches_detail.xlsx', engine='openpyxl') as writer:
-            for idx, match_info in enumerate(partial_matches):
-                sheet_name = f'Mismatch_{idx+1}'[:31]  # Excel 시트명 길이 제한
-                match_info['comparison_df'].to_excel(writer, sheet_name=sheet_name, index=False)
-        print(f"    ✓ 부분 일치 상세 비교: 04_partial_matches_detail.xlsx ({len(partial_matches)}개)")
-    
-    # 5. 전체 요약 저장
-    save_summary_report(matching_records, only_in_oracle, only_in_llm, 
-                       len(df_oracle), len(df_llm))
-    
-    print("\n✓ 모든 비교 결과 저장 완료!")
-
-
-def find_partial_matches(df_oracle: pd.DataFrame, df_llm: pd.DataFrame,
-                        df_oracle_normalized: pd.DataFrame, 
-                        df_llm_normalized: pd.DataFrame,
-                        only_in_oracle: Set[Tuple], 
-                        only_in_llm: Set[Tuple],
-                        max_samples: int = 20) -> list:
-    """
-    완전히 일치하지는 않지만 일부 컬럼이 일치하는 레코드 찾기
-    (예: 키 컬럼은 같은데 값 컬럼이 다른 경우)
-    """
-    partial_matches = []
-    
-    # 첫 번째 컬럼을 키로 가정하고 부분 일치 찾기
-    if len(df_oracle.columns) < 2:
-        return partial_matches
-    
-    key_col = df_oracle.columns[0]
-    
-    # Oracle의 누락 레코드 중에서 샘플링
-    oracle_missing_samples = list(only_in_oracle)[:max_samples]
-    
-    for oracle_tuple in oracle_missing_samples:
-        # Oracle 레코드 찾기
-        oracle_idx = find_matching_row_index(oracle_tuple, df_oracle_normalized)
-        if oracle_idx == -1:
-            continue
-        
-        oracle_row = df_oracle.iloc[oracle_idx]
-        oracle_norm_row = df_oracle_normalized.iloc[oracle_idx]
-        oracle_key = oracle_norm_row[key_col]
-        
-        # LLM에서 같은 키를 가진 레코드 찾기
-        llm_candidates = df_llm_normalized[df_llm_normalized[key_col] == oracle_key]
-        
-        if len(llm_candidates) > 0:
-            # 가장 유사한 레코드 찾기
-            for llm_idx in llm_candidates.index:
-                llm_row = df_llm.iloc[llm_idx]
-                llm_norm_row = df_llm_normalized.iloc[llm_idx]
-                
-                # 컬럼별 비교
-                comparison_df = compare_rows_column_by_column(
-                    oracle_row, llm_row, oracle_norm_row, llm_norm_row
-                )
-                
-                # 일치하는 컬럼 수 계산
-                match_count = (comparison_df['Match'] == '✓').sum()
-                total_cols = len(comparison_df)
-                match_ratio = match_count / total_cols
-                
-                # 부분 일치 (50% 이상 일치하지만 100%는 아닌 경우)
-                if 0.5 <= match_ratio < 1.0:
-                    partial_matches.append({
-                        'oracle_idx': oracle_idx,
-                        'llm_idx': llm_idx,
-                        'match_ratio': match_ratio,
-                        'match_count': match_count,
-                        'total_cols': total_cols,
-                        'comparison_df': comparison_df
-                    })
-                    break
-    
-    return partial_matches
-
-
-def save_summary_report(matching_records: Set[Tuple], 
-                       only_in_oracle: Set[Tuple], 
-                       only_in_llm: Set[Tuple],
-                       oracle_total: int,
-                       llm_total: int):
-    """비교 결과 요약 리포트 저장"""
-    summary_data = {
-        'Metric': [
-            'Oracle 전체 레코드',
-            'LLM 전체 레코드',
-            '완전 일치 레코드',
-            'LLM 누락 레코드',
-            'LLM 오추가 레코드',
-            '일치율 (%)',
-            'Precision (%)',
-            'Recall (%)'
-        ],
-        'Count': [
-            oracle_total,
-            llm_total,
-            len(matching_records),
-            len(only_in_oracle),
-            len(only_in_llm),
-            round(len(matching_records) / oracle_total * 100, 2) if oracle_total > 0 else 0,
-            round(len(matching_records) / llm_total * 100, 2) if llm_total > 0 else 0,
-            round(len(matching_records) / oracle_total * 100, 2) if oracle_total > 0 else 0
-        ]
-    }
-    
-    df_summary = pd.DataFrame(summary_data)
-    df_summary.to_csv('00_comparison_summary.csv', index=False, encoding='utf-8-sig')
-    print(f"    ✓ 비교 요약: 00_comparison_summary.csv")
+    print("\n✓ 불일치 레코드 저장 완료!")
 
 
 def print_results(results: Dict):
@@ -369,23 +179,18 @@ def print_results(results: Dict):
     print("프로시저 정확도 분석 결과")
     print("="*70)
     
+    summary = results['summary']
+    
     print("\n[레코드 수 요약]")
-    print(f"  오라클 전문가 결과:  {results['summary']['oracle_total']:>10,}건")
-    print(f"  LLM 변환 결과:       {results['summary']['llm_total']:>10,}건")
-    print(f"  완전 일치:           {results['summary']['matching']:>10,}건")
-    print(f"  누락된 데이터:       {results['summary']['only_in_oracle']:>10,}건")
-    print(f"  잘못 추가된 데이터:  {results['summary']['only_in_llm']:>10,}건")
+    print(f"  Oracle 전체:        {summary['oracle_total']:>10,}건")
+    print(f"  LLM 전체:           {summary['llm_total']:>10,}건")
+    print(f"  완전 일치:          {summary['matching']:>10,}건")
+    print(f"  Oracle 불일치:      {summary['not_matching_oracle']:>10,}건")
+    print(f"  LLM 불일치:         {summary['not_matching_llm']:>10,}건")
     
-    print("\n[정확도 지표]")
-    print(f"  Precision (정밀도):  {results['metrics']['precision']:>10}%")
-    print(f"  Recall (재현율):     {results['metrics']['recall']:>10}%")
-    print(f"  F1 Score:            {results['metrics']['f1_score']:>10}%")
-    print(f"  누락률:              {results['metrics']['missing_rate']:>10}%")
-    print(f"  오삽입률:            {results['metrics']['false_insertion_rate']:>10}%")
+    print("\n[완전 일치율]")
+    print(f"  일치율:             {summary['match_rate']:>10.2f}%")
     
-    print("\n[상세 분석]")
-    print(f"  소수점 비교 자리수:  {results['details']['decimal_places']:>10}자리")
-    print(f"  정답 대비 일치율:    {results['details']['matching_percentage']:>10}%")
     print("="*70 + "\n")
 
 
