@@ -208,50 +208,59 @@ def parse_decomposed_sql(decomposed: str) -> Tuple[Optional[str], Dict[int, str]
 
 def assemble_sql_with_logic(parent_sql: str, children_dict: Dict[int, str]) -> Tuple[bool, str]:
     """
-    로직으로 SQL 조립 시도
+    로직으로 SQL 조립 시도 (재귀적 치환)
     
     Returns:
         (success, assembled_sql)
-        success: 조립 성공 여부
-        assembled_sql: 조립된 SQL (실패 시 원본 parent_sql 반환)
     """
     if not parent_sql:
         logger.warning("PARENT SQL이 없음 - 조립 실패")
         return False, ""
     
-    # {{CHILD_N}} 패턴 찾기
+    # {{CHILD_N}} 패턴
     placeholder_pattern = r'\{\{CHILD_(\d+)\}\}'
-    placeholders = re.findall(placeholder_pattern, parent_sql)
     
-    if not placeholders:
-        logger.warning("플레이스홀더가 없음 - 조립 불필요")
-        # 플레이스홀더가 없으면 parent_sql 그대로 반환
-        return True, parent_sql
-    
-    # 필요한 CHILD가 모두 있는지 확인
-    required_children = set(int(p) for p in placeholders)
-    available_children = set(children_dict.keys())
-    
-    if not required_children.issubset(available_children):
-        missing = required_children - available_children
-        logger.warning(f"누락된 CHILD: {missing} - 조립 실패")
-        return False, parent_sql
-    
-    # 조립 수행 (역순으로 치환 - 큰 번호부터)
+    # 재귀적 치환 (최대 10번 반복 - 무한루프 방지)
     assembled = parent_sql
-    for child_num in sorted(required_children, reverse=True):
-        placeholder = f"{{{{CHILD_{child_num}}}}}"
-        child_sql = children_dict[child_num]
-        assembled = assembled.replace(placeholder, child_sql)
+    max_iterations = 10
     
-    # 조립 후에도 플레이스홀더가 남아있는지 확인
+    for iteration in range(max_iterations):
+        # 현재 남은 플레이스홀더 찾기
+        placeholders = re.findall(placeholder_pattern, assembled)
+        
+        if not placeholders:
+            # 더 이상 플레이스홀더 없음 - 성공
+            logger.info(f"로직 조립 성공 ({iteration + 1}회 반복)")
+            return True, assembled
+        
+        # 필요한 CHILD가 모두 있는지 확인
+        required_children = set(int(p) for p in placeholders)
+        available_children = set(children_dict.keys())
+        
+        if not required_children.issubset(available_children):
+            missing = required_children - available_children
+            logger.warning(f"누락된 CHILD: {missing} - 조립 실패")
+            return False, assembled
+        
+        # 이번 회차 치환 수행 (역순)
+        changed = False
+        for child_num in sorted(required_children, reverse=True):
+            placeholder = f"{{{{CHILD_{child_num}}}}}"
+            child_sql = children_dict[child_num]
+            
+            if placeholder in assembled:
+                assembled = assembled.replace(placeholder, child_sql)
+                changed = True
+        
+        if not changed:
+            # 치환이 일어나지 않음 - 무한루프 방지
+            logger.warning(f"치환 불가능 - 조립 실패 (남은 플레이스홀더: {placeholders})")
+            return False, assembled
+    
+    # 최대 반복 횟수 초과
     remaining = re.findall(placeholder_pattern, assembled)
-    if remaining:
-        logger.warning(f"조립 후 남은 플레이스홀더: {remaining} - 조립 실패")
-        return False, assembled
-    
-    logger.info("로직 조립 성공")
-    return True, assembled
+    logger.warning(f"최대 반복 횟수 초과 - 조립 실패 (남은 플레이스홀더: {remaining})")
+    return False, assembled
 
 
 # ============================================================================
