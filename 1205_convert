@@ -40,7 +40,8 @@ MAX_CONCURRENT_REQUESTS = 30  # 동시 요청 수
 
 # 괄호 검증 및 복구 설정
 MIN_PARENTHESES_FOR_CHECK = 30  # 괄호 개수가 이 이상일 때만 검증
-MAX_REPAIR_RETRIES = 2  # 복구 재시도 횟수
+MAX_REPAIR_RETRIES = 2  # decompose 재시도 횟수
+MAX_ASSEMBLE_RETRIES = 3  # 조립 재시도 횟수
 
 # ============================================================================
 # 로깅 설정
@@ -595,59 +596,96 @@ async def convert_chunk_with_llm(
 async def repair_parentheses_mismatch(
     session: aiohttp.ClientSession,
     broken_sql: str,
-    chunk: Chunk
+    chunk: Chunk,
+    attempt: int = 1
 ) -> str:
     """괄호 불일치 SQL을 분해 후 재조립하여 복구 (세마포어 없이)"""
-    logger.warning(f"청크 {chunk.chunk_id} 괄호 불일치 감지 - 복구 시도")
+    logger.warning(f"청크 {chunk.chunk_id} 괄호 불일치 감지 - 복구 시도 {attempt}")
     
     open_count, close_count = count_parentheses(broken_sql)
     logger.info(f"  - 여는 괄호: {open_count}, 닫는 괄호: {close_count}")
     
     # 1단계: 분해
-    logger.info(f"청크 {chunk.chunk_id} 복구 1단계: SQL 분해")
+    logger.info(f"청크 {chunk.chunk_id} 복구 1단계: SQL 분해 (시도 {attempt})")
     decompose_system = "당신은 Oracle SQL 괄호 구조 분석 전문가입니다. SQL을 구문 단위로 정확하게 분해하세요."
     decompose_user = create_repair_decompose_prompt(broken_sql)
     
-    # 세마포어 없이 직접 API 호출 (이미 메인 변환에서 세마포어 확보한 상태)
     decomposed = await call_llm_api_direct(session, decompose_system, decompose_user)
     
     # 분해 결과 로그 저장
-    decomposed_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_decomposed.txt"
+    decomposed_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_decomposed.txt"
     with open(decomposed_log_path, 'w', encoding='utf-8') as f:
         f.write(decomposed)
     logger.info(f"  - 분해 결과 저장: {decomposed_log_path}")
     
-    # 2단계: 조립
-    logger.info(f"청크 {chunk.chunk_id} 복구 2단계: SQL 조립")
-    assemble_system = "당신은 Oracle SQL 조립 전문가입니다. 분해된 조각들을 완벽하게 조립하세요."
-    assemble_user = create_repair_assemble_prompt(decomposed)
+    # 분해 결과 괄호 검증
+    decomposed_open, decomposed_close = count_parentheses(decomposed)
+    logger.info(f"  - 분해 결과 괄호: 여는 괄호 {decomposed_open}, 닫는 괄호 {decomposed_close}")
     
-    repaired = await call_llm_api_direct(session, assemble_system, assemble_user)
+    if decomposed_open != decomposed_close:
+        logger.warning(f"  - 경고: 분해 결과 자체에 괄호 불일치 발견! - decompose 재시도 필요")
+        # decompose가 실패했으므로 조립 시도 없이 실패 반환
+        return broken_sql
     
-    # 조립 결과 검증
-    open_after, close_after = count_parentheses(repaired)
-    logger.info(f"  - 복구 후 여는 괄호: {open_after}, 닫는 괄호: {close_after}")
+    # 2단계: 조립 (분해가 성공한 경우에만, 여러 번 재시도)
+    logger.info(f"청크 {chunk.chunk_id} 복구 2단계: SQL 조립 시작 (decompose 시도 {attempt})")
     
-    if open_after == close_after:
-        logger.info(f"청크 {chunk.chunk_id} 괄호 복구 성공!")
+    best_repaired = None
+    best_diff = float('inf')
+    
+    for assemble_attempt in range(MAX_ASSEMBLE_RETRIES):
+        logger.info(f"  - 조립 시도 {assemble_attempt + 1}/{MAX_ASSEMBLE_RETRIES}")
         
-        # 복구 결과 로그 저장
-        repaired_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_success.sql"
-        with open(repaired_log_path, 'w', encoding='utf-8') as f:
-            f.write(f"-- 복구 성공: {open_after} 쌍 매칭\n\n")
+        assemble_system = "당신은 Oracle SQL 조립 전문가입니다. 분해된 조각들을 완벽하게 조립하세요."
+        assemble_user = create_repair_assemble_prompt(decomposed)
+        
+        repaired = await call_llm_api_direct(session, assemble_system, assemble_user)
+        
+        # 조립 결과 검증
+        open_after, close_after = count_parentheses(repaired)
+        diff = abs(open_after - close_after)
+        
+        logger.info(f"    여는 괄호: {open_after}, 닫는 괄호: {close_after}, 차이: {diff}")
+        
+        # 조립 결과 로그 저장
+        assemble_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_assemble{assemble_attempt + 1}.sql"
+        with open(assemble_log_path, 'w', encoding='utf-8') as f:
+            f.write(f"-- 조립 시도 {assemble_attempt + 1} (decompose 시도 {attempt})\n")
+            f.write(f"-- 여는 괄호: {open_after}, 닫는 괄호: {close_after}\n\n")
             f.write(repaired)
         
-        return repaired
-    else:
-        logger.warning(f"청크 {chunk.chunk_id} 괄호 복구 실패 (여전히 불일치)")
+        # 완벽하게 매칭되면 즉시 성공 반환
+        if open_after == close_after:
+            logger.info(f"청크 {chunk.chunk_id} 괄호 복구 성공! (decompose 시도 {attempt}, assemble 시도 {assemble_attempt + 1})")
+            
+            success_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_SUCCESS.sql"
+            with open(success_log_path, 'w', encoding='utf-8') as f:
+                f.write(f"-- 복구 성공 (decompose 시도 {attempt}, assemble 시도 {assemble_attempt + 1}): {open_after} 쌍 매칭\n\n")
+                f.write(repaired)
+            
+            return repaired
         
-        # 복구 실패 로그 저장
-        failed_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_failed.sql"
-        with open(failed_log_path, 'w', encoding='utf-8') as f:
-            f.write(f"-- 복구 실패: 여는 괄호 {open_after}, 닫는 괄호 {close_after}\n\n")
-            f.write(repaired)
+        # 가장 나은 결과 기록 (차이가 가장 적은 것)
+        if diff < best_diff:
+            best_diff = diff
+            best_repaired = repaired
         
-        return repaired  # 실패해도 복구 시도한 결과 반환
+        # 마지막 시도가 아니면 짧은 대기 후 재시도
+        if assemble_attempt < MAX_ASSEMBLE_RETRIES - 1:
+            await asyncio.sleep(1)
+    
+    # 모든 조립 시도 실패
+    logger.warning(f"청크 {chunk.chunk_id} 조립 {MAX_ASSEMBLE_RETRIES}번 시도 모두 실패 (decompose 시도 {attempt})")
+    
+    # 가장 나은 결과 로그 저장
+    best_open, best_close = count_parentheses(best_repaired)
+    failed_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_FAILED_best.sql"
+    with open(failed_log_path, 'w', encoding='utf-8') as f:
+        f.write(f"-- 복구 실패 (decompose 시도 {attempt}, 최선의 조립 결과)\n")
+        f.write(f"-- 여는 괄호: {best_open}, 닫는 괄호: {best_close}\n\n")
+        f.write(best_repaired)
+    
+    return best_repaired
 
 
 async def convert_chunk_with_validation(
@@ -657,7 +695,7 @@ async def convert_chunk_with_validation(
 ) -> tuple[Chunk, str]:
     """청크 변환 + 괄호 검증 + 필요시 복구 (전체 프로세스를 세마포어로 제어)"""
     
-    async with semaphore:  # 전체 프로세스를 세마포어로 감싸기
+    async with semaphore:
         # 1차 변환
         chunk, converted = await convert_chunk_with_llm(session, chunk)
         
@@ -671,7 +709,7 @@ async def convert_chunk_with_validation(
             open_count, close_count = count_parentheses(converted)
             logger.warning(f"청크 {chunk.chunk_id} 괄호 불일치 감지: 여는 괄호 {open_count}, 닫는 괄호 {close_count}")
             
-            # 검증 실패 로그 저장 (2단계 로그)
+            # 검증 실패 로그 저장
             validation_failed_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_validation_failed.sql"
             with open(validation_failed_path, 'w', encoding='utf-8') as f:
                 f.write(f"-- 청크 {chunk.chunk_id} 검증 실패\n")
@@ -680,26 +718,29 @@ async def convert_chunk_with_validation(
                 f.write(f"-- Context: {chunk.parent_context}\n\n")
                 f.write(converted)
             
-            # 복구 시도 (최대 MAX_REPAIR_RETRIES번)
-            for repair_attempt in range(MAX_REPAIR_RETRIES):
-                logger.info(f"청크 {chunk.chunk_id} 복구 시도 {repair_attempt + 1}/{MAX_REPAIR_RETRIES}")
-                
+            # 복구 시도 (decompose 재시도)
+            for decompose_attempt in range(MAX_REPAIR_RETRIES):
                 try:
-                    # repair 함수는 세마포어 없이 직접 API 호출
-                    repaired = await repair_parentheses_mismatch(session, converted, chunk)
+                    repaired = await repair_parentheses_mismatch(
+                        session, 
+                        converted,  # 원본 broken SQL을 계속 사용
+                        chunk, 
+                        attempt=decompose_attempt + 1
+                    )
                     
                     # 복구 성공 여부 확인
                     if not has_parentheses_mismatch(repaired):
-                        logger.info(f"청크 {chunk.chunk_id} 복구 성공 (시도 {repair_attempt + 1})")
+                        logger.info(f"청크 {chunk.chunk_id} 복구 최종 성공 (decompose 시도 {decompose_attempt + 1})")
                         converted = repaired
                         break
                     else:
-                        logger.warning(f"청크 {chunk.chunk_id} 복구 실패 (시도 {repair_attempt + 1}) - 재시도")
-                        converted = repaired  # 실패해도 최신 결과 유지
+                        open_r, close_r = count_parentheses(repaired)
+                        logger.warning(f"청크 {chunk.chunk_id} decompose 시도 {decompose_attempt + 1} 실패 (여는: {open_r}, 닫는: {close_r})")
+                        converted = repaired  # 최선의 결과 유지
                         
                 except Exception as e:
-                    logger.error(f"청크 {chunk.chunk_id} 복구 중 오류 (시도 {repair_attempt + 1}): {e}")
-                    if repair_attempt == MAX_REPAIR_RETRIES - 1:
+                    logger.error(f"청크 {chunk.chunk_id} 복구 중 오류 (decompose 시도 {decompose_attempt + 1}): {e}")
+                    if decompose_attempt == MAX_REPAIR_RETRIES - 1:
                         logger.error(f"청크 {chunk.chunk_id} 복구 최종 실패")
         else:
             open_count, close_count = count_parentheses(converted)
