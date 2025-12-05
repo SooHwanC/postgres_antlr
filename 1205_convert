@@ -29,7 +29,8 @@ os.makedirs(os.path.dirname(LOG_DIR), exist_ok=True)
 
 LLM_API_URL = "-"
 LLM_API_KEY = "-"
-LLM_MODEL = "gpt-5"
+LLM_MODEL = "gpt-5"  # 메인 변환용 모델
+LLM_REPAIR_MODEL = "claude-sonnet-4-20250514"  # 괄호 복구용 모델
 
 # 설정 상수
 MAX_RETRIES = 5
@@ -552,15 +553,20 @@ def create_repair_assemble_prompt(decomposed_sql: str) -> str:
 async def call_llm_api_direct(
     session: aiohttp.ClientSession,
     system_message: str,
-    user_message: str
+    user_message: str,
+    model: str = None
 ) -> str:
     """LLM API 직접 호출 (세마포어 없음)"""
+    # 모델이 명시되지 않으면 기본 모델 사용
+    if model is None:
+        model = LLM_MODEL
+    
     payload = {
         "messages": [
             {"role": "system", "content": system_message},
             {"role": "user", "content": user_message}
         ],
-        "model": LLM_MODEL
+        "model": model
     }
     
     headers = {
@@ -586,29 +592,30 @@ async def call_llm_api_direct(
                 return result
                 
         except asyncio.TimeoutError:
-            logger.warning(f"API 호출 타임아웃 (시도 {attempt + 1})")
+            logger.warning(f"API 호출 타임아웃 (시도 {attempt + 1}, 모델: {model})")
             if attempt == MAX_RETRIES - 1:
                 raise
             await asyncio.sleep(REQUEST_DELAY * 2)
             
         except Exception as e:
-            logger.error(f"API 호출 실패 (시도 {attempt + 1}): {e}")
+            logger.error(f"API 호출 실패 (시도 {attempt + 1}, 모델: {model}): {e}")
             if attempt == MAX_RETRIES - 1:
                 raise
             await asyncio.sleep(REQUEST_DELAY * 2)
     
-    raise Exception("API 호출 최종 실패")
+    raise Exception(f"API 호출 최종 실패 (모델: {model})")
 
 
 async def call_llm_api(
     session: aiohttp.ClientSession,
     system_message: str,
     user_message: str,
-    semaphore: asyncio.Semaphore
+    semaphore: asyncio.Semaphore,
+    model: str = None
 ) -> str:
     """LLM API 호출 공통 함수 (세마포어 사용)"""
     async with semaphore:
-        return await call_llm_api_direct(session, system_message, user_message)
+        return await call_llm_api_direct(session, system_message, user_message, model)
 
 
 async def convert_chunk_with_llm(
@@ -616,12 +623,12 @@ async def convert_chunk_with_llm(
     chunk: Chunk
 ) -> tuple[Chunk, str]:
     """LLM API를 호출하여 청크 변환 (비동기) - 세마포어는 상위에서 관리"""
-    logger.info(f"청크 {chunk.chunk_id} 변환 시작")
+    logger.info(f"청크 {chunk.chunk_id} 변환 시작 (모델: {LLM_MODEL})")
     
     system_message = "당신은 PostgreSQL을 Oracle 19c로 변환하는 전문가입니다. 정확하고 완전한 변환을 수행하세요."
     user_message = create_conversion_prompt(chunk)
     
-    converted = await call_llm_api_direct(session, system_message, user_message)
+    converted = await call_llm_api_direct(session, system_message, user_message, LLM_MODEL)
     logger.info(f"청크 {chunk.chunk_id} 변환 완료")
     
     return chunk, converted
@@ -633,22 +640,23 @@ async def repair_parentheses_mismatch(
     chunk: Chunk,
     attempt: int = 1
 ) -> str:
-    """괄호 불일치 SQL을 분해 후 재조립하여 복구 (세마포어 없이)"""
-    logger.warning(f"청크 {chunk.chunk_id} 괄호 불일치 감지 - 복구 시도 {attempt}")
+    """괄호 불일치 SQL을 분해 후 재조립하여 복구 (세마포어 없이, 복구 전용 모델 사용)"""
+    logger.warning(f"청크 {chunk.chunk_id} 괄호 불일치 감지 - 복구 시도 {attempt} (모델: {LLM_REPAIR_MODEL})")
     
     open_count, close_count = count_parentheses(broken_sql)
     logger.info(f"  - 여는 괄호: {open_count}, 닫는 괄호: {close_count}")
     
-    # 1단계: 분해
-    logger.info(f"청크 {chunk.chunk_id} 복구 1단계: SQL 분해 (시도 {attempt})")
+    # 1단계: 분해 (복구 전용 모델 사용)
+    logger.info(f"청크 {chunk.chunk_id} 복구 1단계: SQL 분해 (시도 {attempt}, 모델: {LLM_REPAIR_MODEL})")
     decompose_system = "당신은 Oracle SQL 괄호 구조 분석 전문가입니다. SQL을 구문 단위로 정확하게 분해하세요."
     decompose_user = create_repair_decompose_prompt(broken_sql)
     
-    decomposed = await call_llm_api_direct(session, decompose_system, decompose_user)
+    decomposed = await call_llm_api_direct(session, decompose_system, decompose_user, LLM_REPAIR_MODEL)
     
     # 분해 결과 로그 저장
     decomposed_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_decomposed.txt"
     with open(decomposed_log_path, 'w', encoding='utf-8') as f:
+        f.write(f"-- 사용 모델: {LLM_REPAIR_MODEL}\n")
         f.write(decomposed)
     logger.info(f"  - 분해 결과 저장: {decomposed_log_path}")
     
@@ -661,19 +669,19 @@ async def repair_parentheses_mismatch(
         # decompose가 실패했으므로 조립 시도 없이 실패 반환
         return broken_sql
     
-    # 2단계: 조립 (분해가 성공한 경우에만, 여러 번 재시도)
-    logger.info(f"청크 {chunk.chunk_id} 복구 2단계: SQL 조립 시작 (decompose 시도 {attempt})")
+    # 2단계: 조립 (분해가 성공한 경우에만, 여러 번 재시도, 복구 전용 모델 사용)
+    logger.info(f"청크 {chunk.chunk_id} 복구 2단계: SQL 조립 시작 (decompose 시도 {attempt}, 모델: {LLM_REPAIR_MODEL})")
     
     best_repaired = None
     best_diff = float('inf')
     
     for assemble_attempt in range(MAX_ASSEMBLE_RETRIES):
-        logger.info(f"  - 조립 시도 {assemble_attempt + 1}/{MAX_ASSEMBLE_RETRIES}")
+        logger.info(f"  - 조립 시도 {assemble_attempt + 1}/{MAX_ASSEMBLE_RETRIES} (모델: {LLM_REPAIR_MODEL})")
         
         assemble_system = "당신은 Oracle SQL 조립 전문가입니다. 분해된 조각들을 완벽하게 조립하세요."
         assemble_user = create_repair_assemble_prompt(decomposed)
         
-        repaired = await call_llm_api_direct(session, assemble_system, assemble_user)
+        repaired = await call_llm_api_direct(session, assemble_system, assemble_user, LLM_REPAIR_MODEL)
         
         # 조립 결과 검증
         open_after, close_after = count_parentheses(repaired)
@@ -684,16 +692,18 @@ async def repair_parentheses_mismatch(
         # 조립 결과 로그 저장
         assemble_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_assemble{assemble_attempt + 1}.sql"
         with open(assemble_log_path, 'w', encoding='utf-8') as f:
+            f.write(f"-- 사용 모델: {LLM_REPAIR_MODEL}\n")
             f.write(f"-- 조립 시도 {assemble_attempt + 1} (decompose 시도 {attempt})\n")
             f.write(f"-- 여는 괄호: {open_after}, 닫는 괄호: {close_after}\n\n")
             f.write(repaired)
         
         # 완벽하게 매칭되면 즉시 성공 반환
         if open_after == close_after:
-            logger.info(f"청크 {chunk.chunk_id} 괄호 복구 성공! (decompose 시도 {attempt}, assemble 시도 {assemble_attempt + 1})")
+            logger.info(f"청크 {chunk.chunk_id} 괄호 복구 성공! (decompose 시도 {attempt}, assemble 시도 {assemble_attempt + 1}, 모델: {LLM_REPAIR_MODEL})")
             
             success_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_SUCCESS.sql"
             with open(success_log_path, 'w', encoding='utf-8') as f:
+                f.write(f"-- 사용 모델: {LLM_REPAIR_MODEL}\n")
                 f.write(f"-- 복구 성공 (decompose 시도 {attempt}, assemble 시도 {assemble_attempt + 1}): {open_after} 쌍 매칭\n\n")
                 f.write(repaired)
             
@@ -709,12 +719,13 @@ async def repair_parentheses_mismatch(
             await asyncio.sleep(1)
     
     # 모든 조립 시도 실패
-    logger.warning(f"청크 {chunk.chunk_id} 조립 {MAX_ASSEMBLE_RETRIES}번 시도 모두 실패 (decompose 시도 {attempt})")
+    logger.warning(f"청크 {chunk.chunk_id} 조립 {MAX_ASSEMBLE_RETRIES}번 시도 모두 실패 (decompose 시도 {attempt}, 모델: {LLM_REPAIR_MODEL})")
     
     # 가장 나은 결과 로그 저장
     best_open, best_close = count_parentheses(best_repaired)
     failed_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_FAILED_best.sql"
     with open(failed_log_path, 'w', encoding='utf-8') as f:
+        f.write(f"-- 사용 모델: {LLM_REPAIR_MODEL}\n")
         f.write(f"-- 복구 실패 (decompose 시도 {attempt}, 최선의 조립 결과)\n")
         f.write(f"-- 여는 괄호: {best_open}, 닫는 괄호: {best_close}\n\n")
         f.write(best_repaired)
@@ -730,7 +741,7 @@ async def convert_chunk_with_validation(
     """청크 변환 + 괄호 검증 + 필요시 복구 (전체 프로세스를 세마포어로 제어)"""
     
     async with semaphore:
-        # 1차 변환
+        # 1차 변환 (메인 모델 사용)
         chunk, converted = await convert_chunk_with_llm(session, chunk)
         
         # CALL 노드는 검증 스킵
@@ -746,13 +757,13 @@ async def convert_chunk_with_validation(
             # 검증 실패 로그 저장
             validation_failed_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_validation_failed.sql"
             with open(validation_failed_path, 'w', encoding='utf-8') as f:
-                f.write(f"-- 청크 {chunk.chunk_id} 검증 실패\n")
+                f.write(f"-- 청크 {chunk.chunk_id} 검증 실패 (변환 모델: {LLM_MODEL})\n")
                 f.write(f"-- 여는 괄호: {open_count}, 닫는 괄호: {close_count}\n")
                 f.write(f"-- Type: {chunk.node_type}\n")
                 f.write(f"-- Context: {chunk.parent_context}\n\n")
                 f.write(converted)
             
-            # 복구 시도 (decompose 재시도)
+            # 복구 시도 (decompose 재시도, 복구 전용 모델 사용)
             for decompose_attempt in range(MAX_REPAIR_RETRIES):
                 try:
                     repaired = await repair_parentheses_mismatch(
@@ -873,6 +884,8 @@ def main():
     
     logger.info("=" * 80)
     logger.info("PostgreSQL to Oracle 프로시저 자동 변환 시작 (괄호 검증 및 복구 기능)")
+    logger.info(f"메인 변환 모델: {LLM_MODEL}")
+    logger.info(f"괄호 복구 모델: {LLM_REPAIR_MODEL}")
     logger.info("=" * 80)
     
     # 1. 파일 로드
@@ -913,6 +926,8 @@ def main():
     logger.info("7단계: 최종 파일 저장")
     with open(OUTPUT_SQL_FILE, 'w', encoding='utf-8') as f:
         f.write(f"-- 변환 완료 시각: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"-- 메인 변환 모델: {LLM_MODEL}\n")
+        f.write(f"-- 괄호 복구 모델: {LLM_REPAIR_MODEL}\n")
         f.write(f"-- 총 청크 수: {len(chunks)}\n")
         f.write(f"-- 변환 성공: {len(converted_chunks)}\n")
         f.write(f"-- 괄호 검증: 여는 괄호 {final_open}, 닫는 괄호 {final_close}\n")
@@ -921,6 +936,10 @@ def main():
     
     # 분석 결과 저장
     analysis = {
+        "conversion_models": {
+            "main_model": LLM_MODEL,
+            "repair_model": LLM_REPAIR_MODEL
+        },
         "total_chunks": len(chunks),
         "converted_chunks": len(converted_chunks),
         "failed_chunks": len(chunks) - len(converted_chunks),
