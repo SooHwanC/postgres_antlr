@@ -88,10 +88,71 @@ class TreeNode:
 # ============================================================================
 # 괄호 검증 유틸리티
 # ============================================================================
+def remove_sql_comments(sql: str) -> str:
+    """SQL에서 주석을 제거 (문자열 리터럴 보호)"""
+    result = []
+    i = 0
+    in_string = False
+    string_char = None
+    
+    while i < len(sql):
+        # 문자열 리터럴 처리
+        if not in_string:
+            if sql[i] in ("'", '"'):
+                in_string = True
+                string_char = sql[i]
+                result.append(sql[i])
+                i += 1
+                continue
+        else:
+            # 문자열 내부
+            result.append(sql[i])
+            if sql[i] == string_char:
+                # 이스케이프 체크 ('')
+                if i + 1 < len(sql) and sql[i + 1] == string_char:
+                    result.append(sql[i + 1])
+                    i += 2
+                    continue
+                else:
+                    in_string = False
+            i += 1
+            continue
+        
+        # 문자열 외부에서 주석 처리
+        # -- 라인 주석
+        if sql[i:i+2] == '--':
+            # 줄 끝까지 스킵
+            while i < len(sql) and sql[i] != '\n':
+                i += 1
+            if i < len(sql):
+                result.append('\n')  # 줄바꿈은 유지
+                i += 1
+            continue
+        
+        # /* */ 블록 주석
+        if sql[i:i+2] == '/*':
+            # */ 찾을 때까지 스킵
+            i += 2
+            while i < len(sql) - 1:
+                if sql[i:i+2] == '*/':
+                    i += 2
+                    break
+                i += 1
+            continue
+        
+        # 일반 문자
+        result.append(sql[i])
+        i += 1
+    
+    return ''.join(result)
+
+
 def count_parentheses(sql: str) -> Tuple[int, int]:
-    """SQL에서 여는 괄호와 닫는 괄호 개수 반환"""
-    open_count = sql.count('(')
-    close_count = sql.count(')')
+    """SQL에서 여는 괄호와 닫는 괄호 개수 반환 (주석 제외)"""
+    # 주석 제거 후 카운트
+    clean_sql = remove_sql_comments(sql)
+    open_count = clean_sql.count('(')
+    close_count = clean_sql.count(')')
     return open_count, close_count
 
 
@@ -449,57 +510,66 @@ def create_repair_assemble_prompt(decomposed_sql: str) -> str:
 # ============================================================================
 # LLM 변환 함수
 # ============================================================================
+async def call_llm_api_direct(
+    session: aiohttp.ClientSession,
+    system_message: str,
+    user_message: str
+) -> str:
+    """LLM API 직접 호출 (세마포어 없음)"""
+    payload = {
+        "messages": [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_message}
+        ],
+        "model": LLM_MODEL
+    }
+    
+    headers = {
+        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    for attempt in range(MAX_RETRIES):
+        try:
+            async with session.post(
+                LLM_API_URL,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+            ) as response:
+                response.raise_for_status()
+                result = await response.text()
+                
+                # 코드 블록 마커 제거
+                result = result.replace('```sql', '').replace('```', '').strip()
+                
+                await asyncio.sleep(REQUEST_DELAY)
+                return result
+                
+        except asyncio.TimeoutError:
+            logger.warning(f"API 호출 타임아웃 (시도 {attempt + 1})")
+            if attempt == MAX_RETRIES - 1:
+                raise
+            await asyncio.sleep(REQUEST_DELAY * 2)
+            
+        except Exception as e:
+            logger.error(f"API 호출 실패 (시도 {attempt + 1}): {e}")
+            if attempt == MAX_RETRIES - 1:
+                raise
+            await asyncio.sleep(REQUEST_DELAY * 2)
+    
+    raise Exception("API 호출 최종 실패")
+
+
 async def call_llm_api(
     session: aiohttp.ClientSession,
     system_message: str,
     user_message: str,
     semaphore: asyncio.Semaphore
 ) -> str:
-    """LLM API 호출 공통 함수"""
+    """LLM API 호출 공통 함수 (세마포어 사용)"""
     async with semaphore:
-        payload = {
-            "messages": [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message}
-            ],
-            "model": LLM_MODEL
-        }
-        
-        headers = {
-            "Authorization": f"Bearer {LLM_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        for attempt in range(MAX_RETRIES):
-            try:
-                async with session.post(
-                    LLM_API_URL,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-                ) as response:
-                    response.raise_for_status()
-                    result = await response.text()
-                    
-                    # 코드 블록 마커 제거
-                    result = result.replace('```sql', '').replace('```', '').strip()
-                    
-                    await asyncio.sleep(REQUEST_DELAY)
-                    return result
-                    
-            except asyncio.TimeoutError:
-                logger.warning(f"API 호출 타임아웃 (시도 {attempt + 1})")
-                if attempt == MAX_RETRIES - 1:
-                    raise
-                await asyncio.sleep(REQUEST_DELAY * 2)
-                
-            except Exception as e:
-                logger.error(f"API 호출 실패 (시도 {attempt + 1}): {e}")
-                if attempt == MAX_RETRIES - 1:
-                    raise
-                await asyncio.sleep(REQUEST_DELAY * 2)
-        
-        raise Exception("API 호출 최종 실패")
+        return await call_llm_api_direct(session, system_message, user_message)
 
 
 async def convert_chunk_with_llm(
@@ -522,10 +592,9 @@ async def convert_chunk_with_llm(
 async def repair_parentheses_mismatch(
     session: aiohttp.ClientSession,
     broken_sql: str,
-    chunk: Chunk,
-    semaphore: asyncio.Semaphore
+    chunk: Chunk
 ) -> str:
-    """괄호 불일치 SQL을 분해 후 재조립하여 복구"""
+    """괄호 불일치 SQL을 분해 후 재조립하여 복구 (세마포어 없이)"""
     logger.warning(f"청크 {chunk.chunk_id} 괄호 불일치 감지 - 복구 시도")
     
     open_count, close_count = count_parentheses(broken_sql)
@@ -536,7 +605,8 @@ async def repair_parentheses_mismatch(
     decompose_system = "당신은 Oracle SQL 괄호 구조 분석 전문가입니다. SQL을 구문 단위로 정확하게 분해하세요."
     decompose_user = create_repair_decompose_prompt(broken_sql)
     
-    decomposed = await call_llm_api(session, decompose_system, decompose_user, semaphore)
+    # 세마포어 없이 직접 API 호출 (이미 메인 변환에서 세마포어 확보한 상태)
+    decomposed = await call_llm_api_direct(session, decompose_system, decompose_user)
     
     # 분해 결과 로그 저장
     decomposed_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_decomposed.txt"
@@ -549,7 +619,7 @@ async def repair_parentheses_mismatch(
     assemble_system = "당신은 Oracle SQL 조립 전문가입니다. 분해된 조각들을 완벽하게 조립하세요."
     assemble_user = create_repair_assemble_prompt(decomposed)
     
-    repaired = await call_llm_api(session, assemble_system, assemble_user, semaphore)
+    repaired = await call_llm_api_direct(session, assemble_system, assemble_user)
     
     # 조립 결과 검증
     open_after, close_after = count_parentheses(repaired)
@@ -584,19 +654,36 @@ async def convert_chunk_with_validation(
 ) -> tuple[Chunk, str]:
     """청크 변환 + 괄호 검증 + 필요시 복구"""
     
-    # 1차 변환
+    # 1차 변환 (세마포어 사용)
     chunk, converted = await convert_chunk_with_llm(session, chunk, semaphore)
+    
+    # CALL 노드는 검증 스킵
+    if chunk.node_type == "CALL" or chunk.node_type.endswith("_CALL"):
+        logger.info(f"청크 {chunk.chunk_id} CALL 타입 - 괄호 검사 스킵")
+        return chunk, converted
     
     # 괄호 검증
     if has_parentheses_mismatch(converted):
-        logger.warning(f"청크 {chunk.chunk_id} 괄호 불일치 감지")
+        open_count, close_count = count_parentheses(converted)
+        logger.warning(f"청크 {chunk.chunk_id} 괄호 불일치 감지: 여는 괄호 {open_count}, 닫는 괄호 {close_count}")
+        
+        # 검증 실패 로그 저장 (2단계 로그)
+        validation_failed_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_validation_failed.sql"
+        with open(validation_failed_path, 'w', encoding='utf-8') as f:
+            f.write(f"-- 청크 {chunk.chunk_id} 검증 실패\n")
+            f.write(f"-- 여는 괄호: {open_count}, 닫는 괄호: {close_count}\n")
+            f.write(f"-- Type: {chunk.node_type}\n")
+            f.write(f"-- Context: {chunk.parent_context}\n\n")
+            f.write(converted)
         
         # 복구 시도 (최대 MAX_REPAIR_RETRIES번)
+        # 이미 세마포어를 획득한 상태에서 복구 수행
         for repair_attempt in range(MAX_REPAIR_RETRIES):
             logger.info(f"청크 {chunk.chunk_id} 복구 시도 {repair_attempt + 1}/{MAX_REPAIR_RETRIES}")
             
             try:
-                repaired = await repair_parentheses_mismatch(session, converted, chunk, semaphore)
+                # repair 함수는 세마포어 없이 직접 API 호출
+                repaired = await repair_parentheses_mismatch(session, converted, chunk)
                 
                 # 복구 성공 여부 확인
                 if not has_parentheses_mismatch(repaired):
@@ -644,26 +731,26 @@ async def convert_all_chunks(chunks: List[Chunk]) -> Dict[int, str]:
 
 
 def save_chunk_log(chunk: Chunk, converted: str):
-    """청크별 로그 저장"""
+    """청크별 로그 저장 (1단계: 원본, 최종: 변환 결과)"""
     os.makedirs(LOG_DIR, exist_ok=True)
     
-    # 원본 저장
+    # 1단계: 원본 저장
     original_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_original.sql"
     with open(original_path, 'w', encoding='utf-8') as f:
-        f.write(f"-- Chunk {chunk.chunk_id}\n")
+        f.write(f"-- 청크 {chunk.chunk_id} - 원본 PostgreSQL\n")
         f.write(f"-- Type: {chunk.node_type}\n")
         f.write(f"-- Context: {chunk.parent_context}\n")
         f.write(f"-- Lines: {chunk.start_line}-{chunk.end_line}\n")
         f.write(f"-- Line Count: {chunk.line_count()}\n\n")
         f.write(chunk.content)
     
-    # 변환 저장
+    # 최종: 변환 결과 저장
     converted_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_converted.sql"
     open_count, close_count = count_parentheses(converted)
     parentheses_status = "OK" if open_count == close_count else f"MISMATCH ({open_count} vs {close_count})"
     
     with open(converted_path, 'w', encoding='utf-8') as f:
-        f.write(f"-- Chunk {chunk.chunk_id} (Converted)\n")
+        f.write(f"-- 청크 {chunk.chunk_id} - 최종 변환 결과 (Oracle)\n")
         f.write(f"-- Type: {chunk.node_type}\n")
         f.write(f"-- Context: {chunk.parent_context}\n")
         f.write(f"-- Lines: {chunk.start_line}-{chunk.end_line}\n")
