@@ -357,13 +357,45 @@ def create_conversion_prompt(chunk: Chunk) -> str:
 - Oracle: INSERT ... WITH ... AS (...) SELECT ... FROM ...
 - 반드시 WITH 절의 위치를 INSERT 뒤, SELECT 앞으로 재배치합니다.
 
-2) 노드 타입: UPDATE
-- **WITH 절이 있는 UPDATE만** MERGE INTO로 변환합니다.
-  예) WITH temp AS (...) UPDATE t SET ... → MERGE INTO t USING (WITH temp AS (...) SELECT ...) s ON (...) WHEN MATCHED THEN UPDATE SET ...
-- **WITH 절이 없는 일반 UPDATE**는 Oracle UPDATE 그대로 유지합니다.
-  예) UPDATE table SET col = val WHERE condition; → UPDATE table SET col = val WHERE condition;
-- 변환 형태 (WITH 있을 때): MERGE INTO target t USING (WITH ... SELECT ...) s ON (매칭 조건) WHEN MATCHED THEN UPDATE SET ...
-- USING 절에는 WITH ~ SELECT 쿼리를 포함합니다.
+2) 노드 타입: UPDATE - 구조에 따른 변환 전략
+**2-1) WITH 절이 있는 UPDATE**
+  - 무조건 MERGE INTO로 변환합니다.
+  - 예) WITH temp AS (...) UPDATE t SET ... WHERE ...
+  - 변환: MERGE INTO t USING (WITH temp AS (...) SELECT ...) s ON (매칭 조건) WHEN MATCHED THEN UPDATE SET ...
+
+**2-2) 단순 UPDATE (서브쿼리 없거나 1-2개 정도)**
+  - 그대로 Oracle UPDATE 구문으로 유지합니다.
+  - 예) UPDATE table SET col = val WHERE condition;
+  - 예) UPDATE table SET col = (SELECT val FROM other WHERE ...) WHERE condition;
+  - 변환: UPDATE table SET col = val WHERE condition;
+
+**2-3) 복잡한 UPDATE (서브쿼리 3개 이상, 또는 중첩/상관 서브쿼리)**
+  - MERGE INTO로 변환하는 것이 성능과 안정성에 유리합니다.
+  - 예) UPDATE t1 SET col1 = (SELECT ...), col2 = (SELECT ...), col3 = (SELECT ...) WHERE id IN (SELECT ...)
+  - 변환: MERGE INTO t1 USING (SELECT ... FROM ...) s ON (t1.id = s.id) WHEN MATCHED THEN UPDATE SET col1 = s.val1, col2 = s.val2, col3 = s.val3
+
+**MERGE 변환 형태:**
+```sql
+MERGE INTO target_table t
+USING (
+  -- WITH 절이 있으면 여기에 포함
+  -- 또는 서브쿼리들을 하나의 소스로 통합
+  SELECT key_columns, update_values
+  FROM source_table
+  WHERE conditions
+) s
+ON (t.key_column = s.key_column)  -- 매칭 조건 (PRIMARY KEY 또는 WHERE 조건 활용)
+WHEN MATCHED THEN
+  UPDATE SET
+    t.col1 = s.val1,
+    t.col2 = s.val2;
+```
+
+**판단 기준:**
+- WITH 절 있음 → 무조건 MERGE
+- 서브쿼리 0-2개 + 단순 구조 → UPDATE 유지
+- 서브쿼리 3개 이상 OR 중첩/상관 서브쿼리 → MERGE 변환
+- FROM 절이 있는 UPDATE (PostgreSQL 특수 문법) → MERGE 변환
 
 3) 노드 타입: DECODE
 - Oracle DECODE는 "값 비교" 함수이며, 불리언 표현(예: iss_delv_amt13_amt > 0 AND ...)이나 TRUE/FALSE 리터럴을 받을 수 없습니다.
@@ -422,8 +454,10 @@ def create_conversion_prompt(chunk: Chunk) -> str:
 검증 체크리스트
 - 노드 타입에 따른 규칙(CASE/DECODE, CTE, UPDATE→MERGE)을 정확히 적용했는가?
 - CTE 위치를 INSERT 뒤, SELECT 앞으로 정확히 재배치했는가?
-- **WITH 절이 있는 UPDATE만** MERGE INTO로 변환했는가?
-- **일반 UPDATE (WITH 없음)는 UPDATE 그대로 유지**했는가?
+- UPDATE 문의 복잡도를 정확히 판단했는가?
+  * WITH 절 있음 → MERGE 변환
+  * 단순 구조(서브쿼리 0-2개) → UPDATE 유지
+  * 복잡한 구조(서브쿼리 3개 이상, 중첩, FROM 절) → MERGE 변환
 - CASE/DECODE의 모든 분기가 동일/호환 타입을 반환하도록 보장했는가?
 - NULL 반환 분기에 대해 NUMBER/DATE/VARCHAR2 등 실제 목표 타입으로 명시적 캐스팅을 했는가?
 - 리터럴 '' 를 '.' 로 변환했는가?
