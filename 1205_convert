@@ -9,6 +9,7 @@ import os
 import time
 import asyncio
 import aiohttp
+import re
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,7 +43,7 @@ MAX_CONCURRENT_REQUESTS = 30  # 동시 요청 수
 # 괄호 검증 및 복구 설정
 MIN_PARENTHESES_FOR_CHECK = 30  # 괄호 개수가 이 이상일 때만 검증
 MAX_REPAIR_RETRIES = 2  # decompose 재시도 횟수
-MAX_ASSEMBLE_RETRIES = 3  # 조립 재시도 횟수
+MAX_ASSEMBLE_RETRIES = 3  # LLM 조립 재시도 횟수 (로직 조립 실패 시)
 
 # ============================================================================
 # 로깅 설정
@@ -169,6 +170,88 @@ def has_parentheses_mismatch(sql: str) -> bool:
     
     # 괄호 개수가 다르면 불일치
     return open_count != close_count
+
+
+# ============================================================================
+# 조립 로직 유틸리티
+# ============================================================================
+def parse_decomposed_sql(decomposed: str) -> Tuple[Optional[str], Dict[int, str]]:
+    """
+    분해된 SQL을 파싱하여 PARENT와 CHILD들로 분리
+    
+    Returns:
+        (parent_sql, children_dict)
+        parent_sql: PARENT 블록의 SQL
+        children_dict: {1: CHILD_1의 SQL, 2: CHILD_2의 SQL, ...}
+    """
+    # [PARENT], [CHILD_N] 블록 파싱
+    pattern = r'\[(PARENT|CHILD_\d+)\]\s*\n(.*?)(?=\n\[(?:PARENT|CHILD_\d+)\]|\Z)'
+    matches = re.findall(pattern, decomposed, re.DOTALL)
+    
+    parent_sql = None
+    children_dict = {}
+    
+    for block_name, content in matches:
+        content = content.strip()
+        
+        if block_name == "PARENT":
+            parent_sql = content
+        elif block_name.startswith("CHILD_"):
+            try:
+                child_num = int(block_name.split("_")[1])
+                children_dict[child_num] = content
+            except (IndexError, ValueError):
+                logger.warning(f"잘못된 CHILD 블록 이름: {block_name}")
+    
+    return parent_sql, children_dict
+
+
+def assemble_sql_with_logic(parent_sql: str, children_dict: Dict[int, str]) -> Tuple[bool, str]:
+    """
+    로직으로 SQL 조립 시도
+    
+    Returns:
+        (success, assembled_sql)
+        success: 조립 성공 여부
+        assembled_sql: 조립된 SQL (실패 시 원본 parent_sql 반환)
+    """
+    if not parent_sql:
+        logger.warning("PARENT SQL이 없음 - 조립 실패")
+        return False, ""
+    
+    # {{CHILD_N}} 패턴 찾기
+    placeholder_pattern = r'\{\{CHILD_(\d+)\}\}'
+    placeholders = re.findall(placeholder_pattern, parent_sql)
+    
+    if not placeholders:
+        logger.warning("플레이스홀더가 없음 - 조립 불필요")
+        # 플레이스홀더가 없으면 parent_sql 그대로 반환
+        return True, parent_sql
+    
+    # 필요한 CHILD가 모두 있는지 확인
+    required_children = set(int(p) for p in placeholders)
+    available_children = set(children_dict.keys())
+    
+    if not required_children.issubset(available_children):
+        missing = required_children - available_children
+        logger.warning(f"누락된 CHILD: {missing} - 조립 실패")
+        return False, parent_sql
+    
+    # 조립 수행 (역순으로 치환 - 큰 번호부터)
+    assembled = parent_sql
+    for child_num in sorted(required_children, reverse=True):
+        placeholder = f"{{{{CHILD_{child_num}}}}}"
+        child_sql = children_dict[child_num]
+        assembled = assembled.replace(placeholder, child_sql)
+    
+    # 조립 후에도 플레이스홀더가 남아있는지 확인
+    remaining = re.findall(placeholder_pattern, assembled)
+    if remaining:
+        logger.warning(f"조립 후 남은 플레이스홀더: {remaining} - 조립 실패")
+        return False, assembled
+    
+    logger.info("로직 조립 성공")
+    return True, assembled
 
 
 # ============================================================================
@@ -488,18 +571,20 @@ def create_repair_decompose_prompt(broken_sql: str) -> str:
 
 분해 규칙
 1. 부모-자식 관계로 SQL을 계층적으로 분해합니다.
-2. 부모 구문은 스켈레톤(뼈대) 형식으로 만들고, 자식이 들어갈 위치는 "{{CHILD_N}}" 형태의 플레이스홀더로 표시합니다.
-3. 각 분해 조각은 독립적으로 괄호가 완전히 매칭되어야 합니다.
-4. 세미콜론(;)은 원래 위치에만 포함시킵니다.
-5. 주석은 유지합니다.
-6. 원본 SQL의 의미와 구조를 절대 변경하지 않습니다.
+2. 부모 구문은 스켈레톤(뼈대) 형식으로 만들고, 자식이 들어갈 위치는 "{{{{CHILD_N}}}}" 형태의 플레이스홀더로 표시합니다.
+3. **중요**: 플레이스홀더는 반드시 정확히 "{{{{CHILD_1}}}}", "{{{{CHILD_2}}}}" 형식을 사용하세요 (중괄호 2개씩).
+4. CHILD 번호는 1부터 순차적으로 증가해야 합니다 (누락 없이).
+5. 각 분해 조각은 독립적으로 괄호가 완전히 매칭되어야 합니다.
+6. 세미콜론(;)은 원래 위치에만 포함시킵니다.
+7. 주석은 유지합니다.
+8. 원본 SQL의 의미와 구조를 절대 변경하지 않습니다.
 
 분해 예시
 원본: INSERT INTO t1 SELECT * FROM (SELECT a, b FROM t2 WHERE c > 0) WHERE d = 1;
 
 분해 결과:
 [PARENT]
-INSERT INTO t1 SELECT * FROM {{CHILD_1}} WHERE d = 1;
+INSERT INTO t1 SELECT * FROM {{{{CHILD_1}}}} WHERE d = 1;
 
 [CHILD_1]
 (SELECT a, b FROM t2 WHERE c > 0)
@@ -512,13 +597,14 @@ INSERT INTO t1 SELECT * FROM {{CHILD_1}} WHERE d = 1;
 출력 형식
 - [PARENT], [CHILD_1], [CHILD_2] ... 형태로 분해된 조각을 출력하세요.
 - 각 조각은 괄호가 완전히 매칭되어야 합니다.
+- 플레이스홀더는 정확히 {{{{CHILD_N}}}} 형식으로 작성하세요.
 - 코드 블록 마커 없이 순수 SQL만 출력하세요.
 
 **분해된 SQL 조각들을 출력하세요:**"""
 
 
 def create_repair_assemble_prompt(decomposed_sql: str) -> str:
-    """괄호 복구를 위한 조립 프롬프트 (2단계)"""
+    """괄호 복구를 위한 조립 프롬프트 (2단계) - LLM 폴백용"""
     return f"""역할
 - 당신은 Oracle SQL 조립 전문가입니다.
 
@@ -640,7 +726,7 @@ async def repair_parentheses_mismatch(
     chunk: Chunk,
     attempt: int = 1
 ) -> str:
-    """괄호 불일치 SQL을 분해 후 재조립하여 복구 (세마포어 없이, 복구 전용 모델 사용)"""
+    """괄호 불일치 SQL을 분해 후 재조립하여 복구 (하이브리드 방식: 로직 우선, LLM 폴백)"""
     logger.warning(f"청크 {chunk.chunk_id} 괄호 불일치 감지 - 복구 시도 {attempt} (모델: {LLM_REPAIR_MODEL})")
     
     open_count, close_count = count_parentheses(broken_sql)
@@ -669,14 +755,75 @@ async def repair_parentheses_mismatch(
         # decompose가 실패했으므로 조립 시도 없이 실패 반환
         return broken_sql
     
-    # 2단계: 조립 (분해가 성공한 경우에만, 여러 번 재시도, 복구 전용 모델 사용)
-    logger.info(f"청크 {chunk.chunk_id} 복구 2단계: SQL 조립 시작 (decompose 시도 {attempt}, 모델: {LLM_REPAIR_MODEL})")
+    # 2단계: 조립 (로직 우선, 실패 시 LLM 폴백)
+    logger.info(f"청크 {chunk.chunk_id} 복구 2단계: SQL 조립 시작 (decompose 시도 {attempt})")
     
-    best_repaired = None
+    # 2-1. 분해된 SQL 파싱
+    parent_sql, children_dict = parse_decomposed_sql(decomposed)
+    
+    if not parent_sql:
+        logger.warning(f"  - PARENT SQL 파싱 실패 - LLM 조립으로 폴백")
+        # 파싱 실패 시 즉시 LLM 조립으로 폴백
+        return await assemble_with_llm_fallback(
+            session, decomposed, chunk, attempt, decomposed
+        )
+    
+    logger.info(f"  - 파싱 성공: PARENT 1개, CHILD {len(children_dict)}개")
+    
+    # 2-2. 로직으로 조립 시도
+    logger.info(f"  - 로직 조립 시도 중...")
+    logic_success, assembled = assemble_sql_with_logic(parent_sql, children_dict)
+    
+    if logic_success:
+        # 로직 조립 성공 - 괄호 검증
+        open_after, close_after = count_parentheses(assembled)
+        logger.info(f"  - 로직 조립 완료: 여는 괄호 {open_after}, 닫는 괄호 {close_after}")
+        
+        # 로직 조립 결과 로그 저장
+        logic_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_logic_assembled.sql"
+        with open(logic_log_path, 'w', encoding='utf-8') as f:
+            f.write(f"-- 로직 조립 결과 (decompose 시도 {attempt})\n")
+            f.write(f"-- 여는 괄호: {open_after}, 닫는 괄호: {close_after}\n\n")
+            f.write(assembled)
+        
+        if open_after == close_after:
+            logger.info(f"청크 {chunk.chunk_id} 괄호 복구 성공! (로직 조립, decompose 시도 {attempt})")
+            
+            success_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_SUCCESS_logic.sql"
+            with open(success_log_path, 'w', encoding='utf-8') as f:
+                f.write(f"-- 복구 성공 (로직 조립, decompose 시도 {attempt}): {open_after} 쌍 매칭\n\n")
+                f.write(assembled)
+            
+            return assembled
+        else:
+            logger.warning(f"  - 로직 조립 성공했으나 괄호 불일치 - LLM 조립으로 폴백")
+    else:
+        logger.warning(f"  - 로직 조립 실패 - LLM 조립으로 폴백")
+    
+    # 2-3. LLM 조립 폴백
+    return await assemble_with_llm_fallback(
+        session, decomposed, chunk, attempt, assembled if logic_success else None
+    )
+
+
+async def assemble_with_llm_fallback(
+    session: aiohttp.ClientSession,
+    decomposed: str,
+    chunk: Chunk,
+    attempt: int,
+    logic_result: Optional[str] = None
+) -> str:
+    """LLM으로 조립 폴백 (로직 조립 실패 시)"""
+    logger.info(f"청크 {chunk.chunk_id} LLM 조립 폴백 시작 (모델: {LLM_REPAIR_MODEL})")
+    
+    best_repaired = logic_result  # 로직 결과가 있으면 초기값으로 사용
     best_diff = float('inf')
+    if logic_result:
+        open_logic, close_logic = count_parentheses(logic_result)
+        best_diff = abs(open_logic - close_logic)
     
     for assemble_attempt in range(MAX_ASSEMBLE_RETRIES):
-        logger.info(f"  - 조립 시도 {assemble_attempt + 1}/{MAX_ASSEMBLE_RETRIES} (모델: {LLM_REPAIR_MODEL})")
+        logger.info(f"  - LLM 조립 시도 {assemble_attempt + 1}/{MAX_ASSEMBLE_RETRIES} (모델: {LLM_REPAIR_MODEL})")
         
         assemble_system = "당신은 Oracle SQL 조립 전문가입니다. 분해된 조각들을 완벽하게 조립하세요."
         assemble_user = create_repair_assemble_prompt(decomposed)
@@ -690,21 +837,21 @@ async def repair_parentheses_mismatch(
         logger.info(f"    여는 괄호: {open_after}, 닫는 괄호: {close_after}, 차이: {diff}")
         
         # 조립 결과 로그 저장
-        assemble_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_assemble{assemble_attempt + 1}.sql"
+        assemble_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_llm_assemble{assemble_attempt + 1}.sql"
         with open(assemble_log_path, 'w', encoding='utf-8') as f:
             f.write(f"-- 사용 모델: {LLM_REPAIR_MODEL}\n")
-            f.write(f"-- 조립 시도 {assemble_attempt + 1} (decompose 시도 {attempt})\n")
+            f.write(f"-- LLM 조립 시도 {assemble_attempt + 1} (decompose 시도 {attempt})\n")
             f.write(f"-- 여는 괄호: {open_after}, 닫는 괄호: {close_after}\n\n")
             f.write(repaired)
         
         # 완벽하게 매칭되면 즉시 성공 반환
         if open_after == close_after:
-            logger.info(f"청크 {chunk.chunk_id} 괄호 복구 성공! (decompose 시도 {attempt}, assemble 시도 {assemble_attempt + 1}, 모델: {LLM_REPAIR_MODEL})")
+            logger.info(f"청크 {chunk.chunk_id} 괄호 복구 성공! (LLM 조립, decompose 시도 {attempt}, assemble 시도 {assemble_attempt + 1})")
             
-            success_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_SUCCESS.sql"
+            success_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_SUCCESS_llm.sql"
             with open(success_log_path, 'w', encoding='utf-8') as f:
                 f.write(f"-- 사용 모델: {LLM_REPAIR_MODEL}\n")
-                f.write(f"-- 복구 성공 (decompose 시도 {attempt}, assemble 시도 {assemble_attempt + 1}): {open_after} 쌍 매칭\n\n")
+                f.write(f"-- 복구 성공 (LLM 조립, decompose 시도 {attempt}, assemble 시도 {assemble_attempt + 1}): {open_after} 쌍 매칭\n\n")
                 f.write(repaired)
             
             return repaired
@@ -719,18 +866,20 @@ async def repair_parentheses_mismatch(
             await asyncio.sleep(1)
     
     # 모든 조립 시도 실패
-    logger.warning(f"청크 {chunk.chunk_id} 조립 {MAX_ASSEMBLE_RETRIES}번 시도 모두 실패 (decompose 시도 {attempt}, 모델: {LLM_REPAIR_MODEL})")
+    logger.warning(f"청크 {chunk.chunk_id} LLM 조립 {MAX_ASSEMBLE_RETRIES}번 시도 모두 실패 (decompose 시도 {attempt})")
     
     # 가장 나은 결과 로그 저장
-    best_open, best_close = count_parentheses(best_repaired)
+    best_open, best_close = count_parentheses(best_repaired) if best_repaired else (0, 0)
     failed_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_attempt{attempt}_FAILED_best.sql"
     with open(failed_log_path, 'w', encoding='utf-8') as f:
-        f.write(f"-- 사용 모델: {LLM_REPAIR_MODEL}\n")
-        f.write(f"-- 복구 실패 (decompose 시도 {attempt}, 최선의 조립 결과)\n")
-        f.write(f"-- 여는 괄호: {best_open}, 닫는 괄호: {best_close}\n\n")
-        f.write(best_repaired)
+        f.write(f"-- 복구 실패 (decompose 시도 {attempt}, 최선의 결과)\n")
+        f.write(f"-- 여는 괄호: {best_open}, 닫는 괄호: {best_close}\n")
+        if logic_result and best_repaired == logic_result:
+            f.write(f"-- 로직 조립 결과 사용\n")
+        f.write("\n")
+        f.write(best_repaired if best_repaired else "")
     
-    return best_repaired
+    return best_repaired if best_repaired else ""
 
 
 async def convert_chunk_with_validation(
@@ -883,9 +1032,10 @@ def main():
     os.makedirs(LOG_DIR, exist_ok=True)
     
     logger.info("=" * 80)
-    logger.info("PostgreSQL to Oracle 프로시저 자동 변환 시작 (괄호 검증 및 복구 기능)")
+    logger.info("PostgreSQL to Oracle 프로시저 자동 변환 시작 (하이브리드 괄호 복구)")
     logger.info(f"메인 변환 모델: {LLM_MODEL}")
     logger.info(f"괄호 복구 모델: {LLM_REPAIR_MODEL}")
+    logger.info(f"조립 방식: 로직 우선 → LLM 폴백")
     logger.info("=" * 80)
     
     # 1. 파일 로드
@@ -928,6 +1078,7 @@ def main():
         f.write(f"-- 변환 완료 시각: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"-- 메인 변환 모델: {LLM_MODEL}\n")
         f.write(f"-- 괄호 복구 모델: {LLM_REPAIR_MODEL}\n")
+        f.write(f"-- 조립 방식: 로직 우선 → LLM 폴백\n")
         f.write(f"-- 총 청크 수: {len(chunks)}\n")
         f.write(f"-- 변환 성공: {len(converted_chunks)}\n")
         f.write(f"-- 괄호 검증: 여는 괄호 {final_open}, 닫는 괄호 {final_close}\n")
@@ -938,7 +1089,8 @@ def main():
     analysis = {
         "conversion_models": {
             "main_model": LLM_MODEL,
-            "repair_model": LLM_REPAIR_MODEL
+            "repair_model": LLM_REPAIR_MODEL,
+            "assembly_strategy": "logic_first_llm_fallback"
         },
         "total_chunks": len(chunks),
         "converted_chunks": len(converted_chunks),
