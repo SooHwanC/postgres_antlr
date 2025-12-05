@@ -1,0 +1,800 @@
+#!/usr/bin/env python3
+"""
+PostgreSQL to Oracle Procedure Converter
+AST 기반 청크 분할 및 LLM 변환 스크립트 (괄호 검증 및 복구 기능 추가)
+"""
+
+import json
+import os
+import time
+import asyncio
+import aiohttp
+from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass
+from pathlib import Path
+import logging
+
+# ============================================================================
+# 설정
+# ============================================================================
+# SQL_FILE_PATH = "./data/month.sql"
+# AST_JSON_PATH = "./data/month_ast.json"
+SQL_FILE_PATH = "./data/usp.sql"
+AST_JSON_PATH = "./data/usp_ast.json"
+OUTPUT_SQL_FILE = "./output/oracle_procedure.sql"
+LOG_DIR = "./conversion_logs/"
+
+os.makedirs(os.path.dirname(OUTPUT_SQL_FILE), exist_ok=True)
+os.makedirs(os.path.dirname(LOG_DIR), exist_ok=True)
+
+LLM_API_URL = "-"
+LLM_API_KEY = "-"
+LLM_MODEL = "gpt-5"
+
+# 설정 상수
+MAX_RETRIES = 5
+REQUEST_TIMEOUT = 1800
+REQUEST_DELAY = 2  # 초
+MAX_CHUNK_LINES = 500
+MAX_CONCURRENT_REQUESTS = 30  # 동시 요청 수
+
+# 괄호 검증 및 복구 설정
+MIN_PARENTHESES_FOR_CHECK = 30  # 괄호 개수가 이 이상일 때만 검증
+MAX_REPAIR_RETRIES = 2  # 복구 재시도 횟수
+
+# ============================================================================
+# 로깅 설정
+# ============================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(f'{LOG_DIR}/conversion.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# ============================================================================
+# 데이터 클래스
+# ============================================================================
+@dataclass
+class Chunk:
+    """변환할 청크 정보"""
+    chunk_id: int
+    node_type: str
+    start_line: int
+    end_line: int
+    content: str
+    parent_context: str
+    is_leaf: bool
+    sequence: int  # 청크의 순서 (병합 시 사용)
+    
+    def line_count(self) -> int:
+        return self.end_line - self.start_line + 1
+
+
+@dataclass
+class TreeNode:
+    """트리 구조 노드 (순회용)"""
+    node_type: str
+    start_line: int
+    end_line: int
+    parent_context: str
+    children: Optional[List['TreeNode']] = None
+    is_leaf: bool = False
+
+
+# ============================================================================
+# 괄호 검증 유틸리티
+# ============================================================================
+def count_parentheses(sql: str) -> Tuple[int, int]:
+    """SQL에서 여는 괄호와 닫는 괄호 개수 반환"""
+    open_count = sql.count('(')
+    close_count = sql.count(')')
+    return open_count, close_count
+
+
+def has_parentheses_mismatch(sql: str) -> bool:
+    """괄호 불일치 여부 확인 (30개 이상일 때만)"""
+    open_count, close_count = count_parentheses(sql)
+    total = open_count + close_count
+    
+    # 괄호가 30개 미만이면 검사하지 않음
+    if total < MIN_PARENTHESES_FOR_CHECK:
+        return False
+    
+    # 괄호 개수가 다르면 불일치
+    return open_count != close_count
+
+
+# ============================================================================
+# SQL 파일 로드
+# ============================================================================
+def load_sql_file(file_path: str) -> List[str]:
+    """SQL 파일을 라인 배열로 로드"""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        logger.info(f"SQL 파일 로드 완료: {len(lines)} 라인")
+        return lines
+    except Exception as e:
+        logger.error(f"SQL 파일 로드 실패: {e}")
+        raise
+
+
+def load_ast_json(file_path: str) -> Dict[str, Any]:
+    """AST JSON 파일 로드"""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            ast = json.load(f)
+        logger.info(f"AST JSON 로드 완료")
+        return ast
+    except Exception as e:
+        logger.error(f"AST JSON 로드 실패: {e}")
+        raise
+
+
+# ============================================================================
+# 청크 추출 (AST 재귀 순회)
+# ============================================================================
+def extract_lines(sql_lines: List[str], start_line: int, end_line: int) -> str:
+    """지정된 라인 범위의 SQL 추출 (1-based index)"""
+    if start_line > end_line or start_line < 1:
+        return ""
+    return ''.join(sql_lines[start_line-1:end_line])
+
+
+def build_tree_structure(
+    node: Dict[str, Any],
+    sql_lines: List[str],
+    parent_context: str = ""
+) -> TreeNode:
+    """
+    AST를 재귀적으로 순회하여 트리 구조 구축
+    절대 원칙: children이 있는 노드는 무조건 리프 노드까지 재귀 탐색
+    """
+    node_type = node.get('type', 'UNKNOWN')
+    start_line = node.get('startLine', 1)
+    end_line = node.get('endLine', 1)
+    children = node.get('children', [])
+    
+    # 현재 컨텍스트 경로
+    current_context = f"{parent_context} > {node_type}" if parent_context else node_type
+    
+    tree_node = TreeNode(
+        node_type=node_type,
+        start_line=start_line,
+        end_line=end_line,
+        parent_context=current_context
+    )
+    
+    # children이 없으면 리프 노드
+    if not children:
+        tree_node.is_leaf = True
+        return tree_node
+    
+    # children이 있으면 컨테이너 노드 - 반드시 재귀 탐색
+    tree_node.is_leaf = False
+    tree_node.children = []
+    
+    # 모든 자식 재귀 처리
+    for child in children:
+        child_tree = build_tree_structure(child, sql_lines, current_context)
+        tree_node.children.append(child_tree)
+    
+    return tree_node
+
+
+def collect_chunks_in_order(
+    tree_node: TreeNode, 
+    sql_lines: List[str],
+    chunks: List[Chunk], 
+    chunk_id_counter: List[int],
+    sequence_counter: List[int]
+):
+    """
+    트리를 순회하면서 청크를 순서대로 수집
+    PREFIX -> 자식들 -> SUFFIX 순서로 수집하여 나중에 순서대로 병합 가능
+    """
+    if tree_node.is_leaf:
+        # 리프 노드 = 하나의 청크
+        content = extract_lines(sql_lines, tree_node.start_line, tree_node.end_line)
+        chunk = Chunk(
+            chunk_id=chunk_id_counter[0],
+            node_type=tree_node.node_type,
+            start_line=tree_node.start_line,
+            end_line=tree_node.end_line,
+            content=content,
+            parent_context=tree_node.parent_context,
+            is_leaf=True,
+            sequence=sequence_counter[0]
+        )
+        chunks.append(chunk)
+        chunk_id_counter[0] += 1
+        sequence_counter[0] += 1
+        
+        # 500 라인 초과 경고
+        if chunk.line_count() > MAX_CHUNK_LINES:
+            logger.warning(
+                f"청크 {chunk.chunk_id} 라인 수 초과: {chunk.line_count()} 라인 "
+                f"({chunk.start_line}-{chunk.end_line})"
+            )
+    else:
+        # 컨테이너 노드 - PREFIX, 자식들, SUFFIX 순서로 처리
+        
+        # 1. PREFIX 추출 및 청크 생성
+        if tree_node.children:
+            first_child_start = tree_node.children[0].start_line
+            if first_child_start > tree_node.start_line:
+                prefix_content = extract_lines(sql_lines, tree_node.start_line, first_child_start - 1)
+                chunk = Chunk(
+                    chunk_id=chunk_id_counter[0],
+                    node_type=f"{tree_node.node_type}_PREFIX",
+                    start_line=tree_node.start_line,
+                    end_line=first_child_start - 1,
+                    content=prefix_content,
+                    parent_context=tree_node.parent_context,
+                    is_leaf=False,
+                    sequence=sequence_counter[0]
+                )
+                chunks.append(chunk)
+                chunk_id_counter[0] += 1
+                sequence_counter[0] += 1
+        
+        # 2. 자식 재귀 처리 (순서대로)
+        if tree_node.children:
+            for child in tree_node.children:
+                collect_chunks_in_order(child, sql_lines, chunks, chunk_id_counter, sequence_counter)
+        
+        # 3. SUFFIX 추출 및 청크 생성
+        if tree_node.children:
+            last_child_end = tree_node.children[-1].end_line
+            if last_child_end < tree_node.end_line:
+                suffix_content = extract_lines(sql_lines, last_child_end + 1, tree_node.end_line)
+                chunk = Chunk(
+                    chunk_id=chunk_id_counter[0],
+                    node_type=f"{tree_node.node_type}_SUFFIX",
+                    start_line=last_child_end + 1,
+                    end_line=tree_node.end_line,
+                    content=suffix_content,
+                    parent_context=tree_node.parent_context,
+                    is_leaf=False,
+                    sequence=sequence_counter[0]
+                )
+                chunks.append(chunk)
+                chunk_id_counter[0] += 1
+                sequence_counter[0] += 1
+
+
+# ============================================================================
+# LLM 변환 프롬프트
+# ============================================================================
+def create_conversion_prompt(chunk: Chunk) -> str:
+    """변환 프롬프트 생성"""
+    return f"""역할
+- 당신은 PostgreSQL Procedure plpgsql 코드를 Oracle 19c plsql 로 변환하는 전문가입니다. 모든 로직을 정확하고 완전하게 변환합니다.
+
+목표
+- 입력된 PostgreSQL Procedure plpgsql 코드를 Oracle 19c plsql 로 정확히 변환합니다.
+- 기존 코드 내 주석을 그대로 유지합니다.
+- 노드 타입별 규칙을 적용하고, 데이터 타입 일치성과 NULL 캐스팅을 엄격히 준수합니다.
+
+입력 형식
+- 컨텍스트 경로: {chunk.parent_context}
+- 노드 타입: {chunk.node_type}
+- 라인 범위: {chunk.start_line}-{chunk.end_line}
+- PostgreSQL 코드:
+```sql
+{chunk.content}
+```
+
+변환 규칙
+1) 노드 타입: CTE
+- PostgreSQL: WITH ... INSERT ... SELECT ... FROM ...
+- Oracle: INSERT ... WITH ... AS (...) SELECT ... FROM ...
+- 반드시 WITH 절의 위치를 INSERT 뒤, SELECT 앞으로 재배치합니다.
+
+2) 노드 타입: UPDATE
+- PostgreSQL의 WITH ~ UPDATE ~ SET 구조는 Oracle에서 MERGE INTO로 변환합니다.
+- 변환 형태: MERGE INTO target t USING (WITH ... SELECT ...) s ON (매칭 조건) WHEN MATCHED THEN UPDATE SET ...
+- USING 절에는 WITH ~ SELECT 쿼리를 포함합니다.
+
+3) 노드 타입: DECODE
+- Oracle DECODE는 "값 비교" 함수이며, 불리언 표현(예: iss_delv_amt13_amt > 0 AND ...)이나 TRUE/FALSE 리터럴을 받을 수 없습니다.
+- 조건식이 필요한 경우 DECODE 대신 CASE WHEN ... THEN ... ELSE ... END로 변환합니다.
+
+4) CASE/DECODE 변환 시 데이터 타입 일치
+- 모든 분기(THEN/ELSE 또는 DECODE의 반환값)는 동일하거나 호환 가능한 단일 데이터 타입을 반환해야 합니다.
+- 분기에서 NULL을 반환해야 할 경우, 대상 컬럼 타입으로 명시적 캐스팅을 반드시 수행합니다.
+  - 숫자 컬럼: CAST(NULL AS NUMBER) 또는 TO_NUMBER(NULL)
+  - 날짜 컬럼: CAST(NULL AS DATE) 또는 TO_DATE(NULL)
+  - 문자 컬럼: CAST(NULL AS VARCHAR2(n)) 또는 TO_CHAR(NULL)
+- 모든 CASE 표현식의 모든 분기는 동일하거나 호환 가능한 단일 타입을 반환하도록 보장합니다.
+- NULL을 문자형으로 기본 캐스팅하는 CAST(NULL AS VARCHAR2(4000)) 같은 패턴을 사용하지 말고, 해당 분기의 실제 목표 타입(숫자면 NUMBER/BINARY_DOUBLE, 날짜면 DATE, 문자면 VARCHAR2 등)으로 명시적으로 캐스팅합니다.
+
+5) GROUP BY
+- GROUP BY 1,2,3… 형태는 Oracle에선 허용되지 않습니다.
+- 명시적 컬럼으로 변환하세요
+
+6) 문자열 함수 변환
+- right(col, n) → substr(col, -n)
+- left(col, n) → substr(col, 1, n)
+
+7) WHILE(FOUND)
+- 오라클에는 FOUND 같은 일반 변수가 없습니다.
+- LOOP + FETCH + EXIT WHEN 패턴으로 변환하세요
+
+8) 괄호 검증
+- 변환 완료 후 반드시 괄호 개수를 검증합니다
+- 여는 괄호 '(' 개수와 닫는 괄호 ')' 개수가 일치하는지 확인
+
+9) FROM dual
+- 완전한 SELECT 문이 아니고 FROM이 없을 시
+- 오라클에선 FROM dual을 사용합니다.
+
+중요 제약사항
+- 축약, 생략, 요약 절대 금지.
+- 모든 로직을 빠짐없이 변환하고, 기존 코드의 주석을 그대로 유지합니다.
+- 괄호 균형 검증: 모든 여는 괄호 '('와 닫는 괄호 ')'의 개수가 정확히 일치하는가?
+- 모든 서브쿼리가 올바르게 닫혔는가?
+- PROCEDURE_SUFFIX는 무시합니다.
+- 리터럴 빈 문자열 '' 은 '.' 으로 변환합니다.
+- DECLARE 는 Oracle에서 사용되지 않습니다.
+- create/drop table 또는 index 관련 SQL은 실행되지 않도록 모두 주석 처리합니다.
+- SQL은 한 글자만 달라져도 오류가 발생할 수 있으므로 정확하게 변환합니다.
+- 코드 블록 마커(``` 등)를 사용하지 말고, 순수 SQL만 출력합니다.
+- 주석이나 설명 없이 변환된 Oracle SQL 코드만 출력합니다.
+- 원본에 ; 가 있다면 절대 누락하지 마세요
+
+출력 요구사항
+- 변환된 Oracle 19c SQL만 출력합니다.
+- 기존 SQL 내 주석을 그대로 유지합니다.
+- create/drop table 또는 index 문은 반드시 주석 처리합니다.
+- 코드 블록 마커를 사용하지 않습니다. 순수 SQL만 출력합니다.
+- 추가적인 설명, 주석(변환 과정 설명 등) 없이 결과 SQL만 제공합니다.
+
+검증 체크리스트
+- 노드 타입에 따른 규칙(CASE/DECODE, CTE, UPDATE→MERGE)을 정확히 적용했는가?
+- CTE 위치를 INSERT 뒤, SELECT 앞으로 정확히 재배치했는가?
+- WITH 기반 UPDATE는 MERGE INTO USING (WITH ... SELECT ...)로 변환했는가?
+- CASE/DECODE의 모든 분기가 동일/호환 타입을 반환하도록 보장했는가?
+- NULL 반환 분기에 대해 NUMBER/DATE/VARCHAR2 등 실제 목표 타입으로 명시적 캐스팅을 했는가?
+- 리터럴 '' 를 '.' 로 변환했는가?
+- right/left 함수를 substr로 정확히 변환했는가?
+- create/drop table/index 문을 주석 처리했는가?
+- 출력에 코드 블록 마커나 변환 설명이 없는가?
+- 여는 괄호 '('와 닫는 괄호 ')'의 개수가 정확히 일치하는가?
+
+**변환된 Oracle 코드를 출력하세요:**"""
+
+
+def create_repair_decompose_prompt(broken_sql: str) -> str:
+    """괄호 복구를 위한 분해 프롬프트 (1단계)"""
+    open_count, close_count = count_parentheses(broken_sql)
+    
+    return f"""역할
+- 당신은 Oracle SQL 괄호 구조 분석 전문가입니다.
+
+현재 상황
+- 여는 괄호 '(' 개수: {open_count}개
+- 닫는 괄호 ')' 개수: {close_count}개
+- 괄호 불일치로 인해 SQL 실행이 불가능합니다.
+
+목표
+- SQL을 구문 단위로 분해하여 각 조각의 괄호 구조를 완전하게 만들어야 합니다.
+- 분해된 조각들을 재조립하면 완전한 SQL이 됩니다.
+
+분해 규칙
+1. 부모-자식 관계로 SQL을 계층적으로 분해합니다.
+2. 부모 구문은 스켈레톤(뼈대) 형식으로 만들고, 자식이 들어갈 위치는 "{{CHILD_N}}" 형태의 플레이스홀더로 표시합니다.
+3. 각 분해 조각은 독립적으로 괄호가 완전히 매칭되어야 합니다.
+4. 세미콜론(;)은 원래 위치에만 포함시킵니다.
+5. 주석은 유지합니다.
+6. 원본 SQL의 의미와 구조를 절대 변경하지 않습니다.
+
+분해 예시
+원본: INSERT INTO t1 SELECT * FROM (SELECT a, b FROM t2 WHERE c > 0) WHERE d = 1;
+
+분해 결과:
+[PARENT]
+INSERT INTO t1 SELECT * FROM {{CHILD_1}} WHERE d = 1;
+
+[CHILD_1]
+(SELECT a, b FROM t2 WHERE c > 0)
+
+입력 SQL (괄호 불완전):
+```sql
+{broken_sql}
+```
+
+출력 형식
+- [PARENT], [CHILD_1], [CHILD_2] ... 형태로 분해된 조각을 출력하세요.
+- 각 조각은 괄호가 완전히 매칭되어야 합니다.
+- 코드 블록 마커 없이 순수 SQL만 출력하세요.
+
+**분해된 SQL 조각들을 출력하세요:**"""
+
+
+def create_repair_assemble_prompt(decomposed_sql: str) -> str:
+    """괄호 복구를 위한 조립 프롬프트 (2단계)"""
+    return f"""역할
+- 당신은 Oracle SQL 조립 전문가입니다.
+
+목표
+- 분해된 SQL 조각들을 재조립하여 괄호가 완전히 매칭되는 완전한 SQL을 생성합니다.
+
+조립 규칙
+1. [PARENT]의 {{{{CHILD_N}}}} 플레이스홀더를 해당 [CHILD_N]의 내용으로 치환합니다.
+2. 모든 여는 괄호 '('와 닫는 괄호 ')'가 정확히 매칭되어야 합니다.
+3. 원본 SQL의 의미와 로직을 절대 변경하지 않습니다.
+4. 세미콜론(;) 위치를 정확히 유지합니다.
+5. 주석을 유지합니다.
+
+입력 (분해된 SQL):
+{decomposed_sql}
+
+출력 형식
+- 완전히 조립된 SQL만 출력하세요.
+- 코드 블록 마커(``` 등) 없이 순수 SQL만 출력하세요.
+- 설명이나 주석 추가 없이 결과 SQL만 출력하세요.
+
+검증 사항
+- 여는 괄호 '('와 닫는 괄호 ')'의 개수가 정확히 일치하는가?
+- 모든 서브쿼리와 함수 호출이 올바르게 닫혔는가?
+
+**조립된 완전한 Oracle SQL을 출력하세요:**"""
+
+
+# ============================================================================
+# LLM 변환 함수
+# ============================================================================
+async def call_llm_api(
+    session: aiohttp.ClientSession,
+    system_message: str,
+    user_message: str,
+    semaphore: asyncio.Semaphore
+) -> str:
+    """LLM API 호출 공통 함수"""
+    async with semaphore:
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
+            ],
+            "model": LLM_MODEL
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {LLM_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        for attempt in range(MAX_RETRIES):
+            try:
+                async with session.post(
+                    LLM_API_URL,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+                ) as response:
+                    response.raise_for_status()
+                    result = await response.text()
+                    
+                    # 코드 블록 마커 제거
+                    result = result.replace('```sql', '').replace('```', '').strip()
+                    
+                    await asyncio.sleep(REQUEST_DELAY)
+                    return result
+                    
+            except asyncio.TimeoutError:
+                logger.warning(f"API 호출 타임아웃 (시도 {attempt + 1})")
+                if attempt == MAX_RETRIES - 1:
+                    raise
+                await asyncio.sleep(REQUEST_DELAY * 2)
+                
+            except Exception as e:
+                logger.error(f"API 호출 실패 (시도 {attempt + 1}): {e}")
+                if attempt == MAX_RETRIES - 1:
+                    raise
+                await asyncio.sleep(REQUEST_DELAY * 2)
+        
+        raise Exception("API 호출 최종 실패")
+
+
+async def convert_chunk_with_llm(
+    session: aiohttp.ClientSession,
+    chunk: Chunk,
+    semaphore: asyncio.Semaphore
+) -> tuple[Chunk, str]:
+    """LLM API를 호출하여 청크 변환 (비동기)"""
+    logger.info(f"청크 {chunk.chunk_id} 변환 시작")
+    
+    system_message = "당신은 PostgreSQL을 Oracle 19c로 변환하는 전문가입니다. 정확하고 완전한 변환을 수행하세요."
+    user_message = create_conversion_prompt(chunk)
+    
+    converted = await call_llm_api(session, system_message, user_message, semaphore)
+    logger.info(f"청크 {chunk.chunk_id} 변환 완료")
+    
+    return chunk, converted
+
+
+async def repair_parentheses_mismatch(
+    session: aiohttp.ClientSession,
+    broken_sql: str,
+    chunk: Chunk,
+    semaphore: asyncio.Semaphore
+) -> str:
+    """괄호 불일치 SQL을 분해 후 재조립하여 복구"""
+    logger.warning(f"청크 {chunk.chunk_id} 괄호 불일치 감지 - 복구 시도")
+    
+    open_count, close_count = count_parentheses(broken_sql)
+    logger.info(f"  - 여는 괄호: {open_count}, 닫는 괄호: {close_count}")
+    
+    # 1단계: 분해
+    logger.info(f"청크 {chunk.chunk_id} 복구 1단계: SQL 분해")
+    decompose_system = "당신은 Oracle SQL 괄호 구조 분석 전문가입니다. SQL을 구문 단위로 정확하게 분해하세요."
+    decompose_user = create_repair_decompose_prompt(broken_sql)
+    
+    decomposed = await call_llm_api(session, decompose_system, decompose_user, semaphore)
+    
+    # 분해 결과 로그 저장
+    decomposed_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_decomposed.txt"
+    with open(decomposed_log_path, 'w', encoding='utf-8') as f:
+        f.write(decomposed)
+    logger.info(f"  - 분해 결과 저장: {decomposed_log_path}")
+    
+    # 2단계: 조립
+    logger.info(f"청크 {chunk.chunk_id} 복구 2단계: SQL 조립")
+    assemble_system = "당신은 Oracle SQL 조립 전문가입니다. 분해된 조각들을 완벽하게 조립하세요."
+    assemble_user = create_repair_assemble_prompt(decomposed)
+    
+    repaired = await call_llm_api(session, assemble_system, assemble_user, semaphore)
+    
+    # 조립 결과 검증
+    open_after, close_after = count_parentheses(repaired)
+    logger.info(f"  - 복구 후 여는 괄호: {open_after}, 닫는 괄호: {close_after}")
+    
+    if open_after == close_after:
+        logger.info(f"청크 {chunk.chunk_id} 괄호 복구 성공!")
+        
+        # 복구 결과 로그 저장
+        repaired_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_success.sql"
+        with open(repaired_log_path, 'w', encoding='utf-8') as f:
+            f.write(f"-- 복구 성공: {open_after} 쌍 매칭\n\n")
+            f.write(repaired)
+        
+        return repaired
+    else:
+        logger.warning(f"청크 {chunk.chunk_id} 괄호 복구 실패 (여전히 불일치)")
+        
+        # 복구 실패 로그 저장
+        failed_log_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_repair_failed.sql"
+        with open(failed_log_path, 'w', encoding='utf-8') as f:
+            f.write(f"-- 복구 실패: 여는 괄호 {open_after}, 닫는 괄호 {close_after}\n\n")
+            f.write(repaired)
+        
+        return repaired  # 실패해도 복구 시도한 결과 반환
+
+
+async def convert_chunk_with_validation(
+    session: aiohttp.ClientSession,
+    chunk: Chunk,
+    semaphore: asyncio.Semaphore
+) -> tuple[Chunk, str]:
+    """청크 변환 + 괄호 검증 + 필요시 복구"""
+    
+    # 1차 변환
+    chunk, converted = await convert_chunk_with_llm(session, chunk, semaphore)
+    
+    # 괄호 검증
+    if has_parentheses_mismatch(converted):
+        logger.warning(f"청크 {chunk.chunk_id} 괄호 불일치 감지")
+        
+        # 복구 시도 (최대 MAX_REPAIR_RETRIES번)
+        for repair_attempt in range(MAX_REPAIR_RETRIES):
+            logger.info(f"청크 {chunk.chunk_id} 복구 시도 {repair_attempt + 1}/{MAX_REPAIR_RETRIES}")
+            
+            try:
+                repaired = await repair_parentheses_mismatch(session, converted, chunk, semaphore)
+                
+                # 복구 성공 여부 확인
+                if not has_parentheses_mismatch(repaired):
+                    logger.info(f"청크 {chunk.chunk_id} 복구 성공 (시도 {repair_attempt + 1})")
+                    converted = repaired
+                    break
+                else:
+                    logger.warning(f"청크 {chunk.chunk_id} 복구 실패 (시도 {repair_attempt + 1}) - 재시도")
+                    converted = repaired  # 실패해도 최신 결과 유지
+                    
+            except Exception as e:
+                logger.error(f"청크 {chunk.chunk_id} 복구 중 오류 (시도 {repair_attempt + 1}): {e}")
+                if repair_attempt == MAX_REPAIR_RETRIES - 1:
+                    logger.error(f"청크 {chunk.chunk_id} 복구 최종 실패")
+    else:
+        open_count, close_count = count_parentheses(converted)
+        total = open_count + close_count
+        if total >= MIN_PARENTHESES_FOR_CHECK:
+            logger.info(f"청크 {chunk.chunk_id} 괄호 검증 통과 ({open_count} 쌍)")
+    
+    return chunk, converted
+
+
+async def convert_all_chunks(chunks: List[Chunk]) -> Dict[int, str]:
+    """모든 청크를 병렬로 변환 (괄호 검증 포함)"""
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    converted_chunks = {}
+    
+    async with aiohttp.ClientSession() as session:
+        tasks = [convert_chunk_with_validation(session, chunk, semaphore) for chunk in chunks]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"변환 실패: {result}")
+                continue
+            
+            chunk, converted = result
+            converted_chunks[chunk.chunk_id] = converted
+            
+            # 로그 저장
+            save_chunk_log(chunk, converted)
+    
+    return converted_chunks
+
+
+def save_chunk_log(chunk: Chunk, converted: str):
+    """청크별 로그 저장"""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    
+    # 원본 저장
+    original_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_original.sql"
+    with open(original_path, 'w', encoding='utf-8') as f:
+        f.write(f"-- Chunk {chunk.chunk_id}\n")
+        f.write(f"-- Type: {chunk.node_type}\n")
+        f.write(f"-- Context: {chunk.parent_context}\n")
+        f.write(f"-- Lines: {chunk.start_line}-{chunk.end_line}\n")
+        f.write(f"-- Line Count: {chunk.line_count()}\n\n")
+        f.write(chunk.content)
+    
+    # 변환 저장
+    converted_path = f"{LOG_DIR}/chunk_{chunk.chunk_id:03d}_converted.sql"
+    open_count, close_count = count_parentheses(converted)
+    parentheses_status = "OK" if open_count == close_count else f"MISMATCH ({open_count} vs {close_count})"
+    
+    with open(converted_path, 'w', encoding='utf-8') as f:
+        f.write(f"-- Chunk {chunk.chunk_id} (Converted)\n")
+        f.write(f"-- Type: {chunk.node_type}\n")
+        f.write(f"-- Context: {chunk.parent_context}\n")
+        f.write(f"-- Lines: {chunk.start_line}-{chunk.end_line}\n")
+        f.write(f"-- Parentheses: {parentheses_status}\n\n")
+        f.write(converted)
+
+
+# ============================================================================
+# 트리 재구성 및 렌더링
+# ============================================================================
+def merge_converted_chunks(chunks: List[Chunk], converted_chunks: Dict[int, str]) -> str:
+    """
+    변환된 청크들을 순서대로 병합
+    sequence 순서대로 정렬 후 그대로 이어붙임
+    """
+    # sequence 순서로 정렬
+    sorted_chunks = sorted(chunks, key=lambda c: c.sequence)
+    
+    result = []
+    for chunk in sorted_chunks:
+        converted = converted_chunks.get(chunk.chunk_id)
+        if converted:
+            result.append(converted)
+            if not converted.endswith('\n'):
+                result.append('\n')
+        else:
+            # 변환 실패한 경우 원본을 주석 처리하여 포함
+            logger.warning(f"청크 {chunk.chunk_id} 변환 실패 - 원본을 주석으로 포함")
+    
+    return ''.join(result)
+
+
+# ============================================================================
+# 메인 실행
+# ============================================================================
+def main():
+    """메인 실행 함수"""
+    start_time = time.time()
+    
+    # 로그 디렉토리 생성
+    os.makedirs(LOG_DIR, exist_ok=True)
+    
+    logger.info("=" * 80)
+    logger.info("PostgreSQL to Oracle 프로시저 자동 변환 시작 (괄호 검증 및 복구 기능)")
+    logger.info("=" * 80)
+    
+    # 1. 파일 로드
+    logger.info("1단계: 파일 로드")
+    sql_lines = load_sql_file(SQL_FILE_PATH)
+    ast_data = load_ast_json(AST_JSON_PATH)
+    
+    # 2. 트리 구조 구축
+    logger.info("2단계: AST 트리 구조 구축")
+    tree_root = build_tree_structure(ast_data, sql_lines)
+    
+    # 3. 청크 수집
+    logger.info("3단계: 청크 순서대로 수집")
+    chunks = []
+    chunk_id_counter = [1]
+    sequence_counter = [0]
+    collect_chunks_in_order(tree_root, sql_lines, chunks, chunk_id_counter, sequence_counter)
+    logger.info(f"총 {len(chunks)}개 청크 수집 완료 (순서: 0-{sequence_counter[0]-1})")
+    
+    # 4. 청크별 변환 (병렬 처리 + 괄호 검증)
+    logger.info("4단계: LLM 청크 변환 (병렬 처리 + 괄호 검증)")
+    converted_chunks = asyncio.run(convert_all_chunks(chunks))
+    logger.info(f"변환 완료: {len(converted_chunks)}/{len(chunks)} 청크")
+    
+    # 5. 청크 병합
+    logger.info("5단계: 변환된 청크를 순서대로 병합")
+    final_sql = merge_converted_chunks(chunks, converted_chunks)
+    
+    # 6. 최종 괄호 검증
+    logger.info("6단계: 최종 SQL 괄호 검증")
+    final_open, final_close = count_parentheses(final_sql)
+    if final_open == final_close:
+        logger.info(f"✓ 최종 SQL 괄호 검증 성공: {final_open} 쌍 매칭")
+    else:
+        logger.warning(f"✗ 최종 SQL 괄호 불일치: 여는 괄호 {final_open}, 닫는 괄호 {final_close}")
+    
+    # 7. 파일 저장
+    logger.info("7단계: 최종 파일 저장")
+    with open(OUTPUT_SQL_FILE, 'w', encoding='utf-8') as f:
+        f.write(f"-- 변환 완료 시각: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"-- 총 청크 수: {len(chunks)}\n")
+        f.write(f"-- 변환 성공: {len(converted_chunks)}\n")
+        f.write(f"-- 괄호 검증: 여는 괄호 {final_open}, 닫는 괄호 {final_close}\n")
+        f.write("\n")
+        f.write(final_sql)
+    
+    # 분석 결과 저장
+    analysis = {
+        "total_chunks": len(chunks),
+        "converted_chunks": len(converted_chunks),
+        "failed_chunks": len(chunks) - len(converted_chunks),
+        "total_lines": len(sql_lines),
+        "parentheses_check": {
+            "open_count": final_open,
+            "close_count": final_close,
+            "is_balanced": final_open == final_close
+        },
+        "chunks_detail": [
+            {
+                "chunk_id": chunk.chunk_id,
+                "sequence": chunk.sequence,
+                "type": chunk.node_type,
+                "context": chunk.parent_context,
+                "lines": f"{chunk.start_line}-{chunk.end_line}",
+                "line_count": chunk.line_count(),
+                "converted": chunk.chunk_id in converted_chunks,
+                "parentheses_balanced": not has_parentheses_mismatch(
+                    converted_chunks.get(chunk.chunk_id, "")
+                ) if chunk.chunk_id in converted_chunks else None
+            }
+            for chunk in chunks
+        ]
+    }
+    
+    with open(f"{LOG_DIR}/analysis_result.json", 'w', encoding='utf-8') as f:
+        json.dump(analysis, f, indent=2, ensure_ascii=False)
+    
+    elapsed_time = time.time() - start_time
+    
+    logger.info("=" * 80)
+    logger.info("변환 완료")
+    logger.info(f"실행 시간: {elapsed_time:.2f}초")
+    logger.info(f"출력 파일: {OUTPUT_SQL_FILE}")
+    logger.info(f"로그 디렉토리: {LOG_DIR}")
+    logger.info(f"최종 괄호 상태: {'✓ 균형' if final_open == final_close else '✗ 불균형'}")
+    logger.info("=" * 80)
+
+
+if __name__ == "__main__":
+    main()
